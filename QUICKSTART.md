@@ -105,7 +105,7 @@ Discover and test all endpoints at https://api.example.com/v1
 
 ## Pro Tips
 
-1. **Context Matters** - Cobra Lite maintains chat history. Build on previous results.
+1. **Context Matters** - Cobra Lite stores conversation sessions. Build on previous results in the same session.
 2. **Be Specific** - More detail = better results
 3. **Tool Selection** - Mention specific tools if you prefer them (nmap, nuclei, etc.)
 4. **Sub-Agents** - Ask Cobra Lite to "spawn an agent for X" for parallel work

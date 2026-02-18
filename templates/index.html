@@ -48,45 +48,55 @@
         </p>
       </section>
 
-      <section id="key-gate" class="panel token-panel {% if has_gateway %}hidden{% endif %}">
-        <h2>Connect to Gateway</h2>
-        <p class="panel-sub">
-          Enter your gateway URL. The default is <code>{{ default_gateway_url }}</code> for local instances.
-          <span class="help-wrap">
-            <button type="button" class="help-icon" aria-label="What is this?">?</button>
-            <span class="help-popup">
-              Gateway is the local service that powers automation, tools, and session orchestration for this UI.
-              <a href="https://docs.openclaw.ai" target="_blank" rel="noopener noreferrer">
-                Documentation
-              </a>
-            </span>
-          </span>
-        </p>
-        <form id="key-form" class="stack-form" autocomplete="off">
-          <label for="api-key-input" class="sr-only">Gateway URL</label>
-          <input
-            id="api-key-input"
-            name="gateway_url"
-            type="text"
-            placeholder="{{ default_gateway_url }}"
-            value="{{ saved_gateway_url }}"
-            required
-          />
-          <button class="cta-btn" type="submit">Connect</button>
-        </form>
-        <p id="key-status" class="status-text" aria-live="polite"></p>
-      </section>
-
-      <section id="main-app" class="panel prompt-panel {% if not has_gateway %}hidden{% endif %}">
-        <div class="prompt-header">
-          <div class="prompt-title-row">
-            <h2>Chat with Cobra Lite</h2>
-            <button id="clear-chat-btn" class="ghost-btn" type="button">Clear chat</button>
+      <div class="workspace">
+        <aside id="session-pane" class="panel session-pane {% if not has_gateway %}hidden{% endif %}">
+          <div class="session-pane-head">
+            <h2>Sessions</h2>
+            <button id="new-session-btn" class="ghost-btn new-session-btn" type="button">+ New Session</button>
           </div>
-          <p>Enter to send. Use Shift+Enter for a new line.</p>
+          <div id="session-list" class="session-list" aria-live="polite"></div>
+          <p id="session-status" class="status-text" aria-live="polite"></p>
+        </aside>
+
+        <div class="workspace-main">
+          <section id="key-gate" class="panel token-panel {% if has_gateway %}hidden{% endif %}">
+            <h2>Connect to Gateway</h2>
+            <p class="panel-sub">
+              Enter your gateway URL. The default is <code>{{ default_gateway_url }}</code> for local instances.
+              <span class="help-wrap">
+                <button type="button" class="help-icon" aria-label="What is this?">?</button>
+                <span class="help-popup">
+                  Gateway is the local service that powers automation, tools, and session orchestration for this UI.
+                  <a href="https://docs.openclaw.ai" target="_blank" rel="noopener noreferrer">
+                    Documentation
+                  </a>
+                </span>
+              </span>
+            </p>
+            <form id="key-form" class="stack-form" autocomplete="off">
+              <label for="api-key-input" class="sr-only">Gateway URL</label>
+              <input
+                id="api-key-input"
+                name="gateway_url"
+                type="text"
+                placeholder="{{ default_gateway_url }}"
+                value="{{ saved_gateway_url }}"
+                required
+              />
+              <button class="cta-btn" type="submit">Connect</button>
+            </form>
+            <p id="key-status" class="status-text" aria-live="polite"></p>
+          </section>
+
+          <section id="main-app" class="panel prompt-panel {% if not has_gateway %}hidden{% endif %}">
+            <div class="prompt-header">
+              <h2>Chat with Cobra Lite</h2>
+              <p>Enter to send. Use Shift+Enter for a new line.</p>
+            </div>
+            <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
+          </section>
         </div>
-        <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
-      </section>
+      </div>
 
       <section id="composer-dock" class="composer-dock {% if not has_gateway %}hidden{% endif %}">
         <form id="prompt-form" class="prompt-form">

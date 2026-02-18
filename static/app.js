@@ -5,7 +5,10 @@ const keyGate = document.getElementById("key-gate");
 const mainApp = document.getElementById("main-app");
 const composerDock = document.getElementById("composer-dock");
 const chatThread = document.getElementById("chat-thread");
-const clearChatBtn = document.getElementById("clear-chat-btn");
+const sessionPane = document.getElementById("session-pane");
+const sessionList = document.getElementById("session-list");
+const sessionStatus = document.getElementById("session-status");
+const newSessionBtn = document.getElementById("new-session-btn");
 
 const keyForm = document.getElementById("key-form");
 const keyInput = document.getElementById("api-key-input");
@@ -27,10 +30,11 @@ let isRunning = false;
 let autoScrollEnabled = true;
 let unseenEventCount = 0;
 let jumpLatestBtn = null;
+const ACTIVE_SESSION_STORAGE_KEY = "cobraLite.activeSessionId.v1";
 
-const CHAT_STORAGE_KEY = "cobraLite.chat.v1";
-const CHAT_MAX_MESSAGES = 2000;
-const CHAT_MAX_CHARS = 240000;
+let activeSessionId = null;
+let activeSessionMessages = [];
+let sessionSummaries = [];
 
 function decodeEscapedSequences(text) {
   if (!text || !text.includes("\\")) {
@@ -100,6 +104,8 @@ function setUnlocked(unlocked) {
   keyGate?.classList.toggle("hidden", unlocked);
   mainApp?.classList.toggle("hidden", !unlocked);
   composerDock?.classList.toggle("hidden", !unlocked);
+  sessionPane?.classList.toggle("hidden", !unlocked);
+  document.body.classList.toggle("sidebar-enabled", unlocked);
 }
 
 function setRunningState(running) {
@@ -113,70 +119,279 @@ function setRunningState(running) {
   }
 }
 
-function safeJsonParse(text, fallback) {
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((m) => m && typeof m === "object")
+    .map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: typeof m.content === "string" ? m.content : "",
+      ts: typeof m.ts === "number" ? m.ts : Date.now(),
+    }))
+    .filter((m) => m.content.trim().length > 0);
+}
+
+function readStoredSessionId() {
   try {
-    return JSON.parse(text);
+    const raw = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+    const id = typeof raw === "string" ? raw.trim() : "";
+    return id || null;
   } catch (_err) {
-    return fallback;
+    return null;
   }
 }
 
-function loadChatHistory() {
+function writeStoredSessionId(sessionId) {
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    const parsed = safeJsonParse(raw || "[]", []);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((m) => m && typeof m === "object")
-      .map((m) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: typeof m.content === "string" ? m.content : "",
-        ts: typeof m.ts === "number" ? m.ts : Date.now(),
-      }))
-      .filter((m) => m.content.trim().length > 0);
-  } catch (_err) {
-    return [];
-  }
-}
-
-function pruneChatHistory(history) {
-  let out = Array.isArray(history) ? history.slice() : [];
-  if (CHAT_MAX_MESSAGES > 0 && out.length > CHAT_MAX_MESSAGES) {
-    out = out.slice(out.length - CHAT_MAX_MESSAGES);
-  }
-  if (CHAT_MAX_CHARS <= 0) {
-    return out;
-  }
-
-  let total = 0;
-  const keptRev = [];
-  for (let i = out.length - 1; i >= 0; i -= 1) {
-    const msg = out[i];
-    const content = typeof msg.content === "string" ? msg.content : "";
-    total += content.length + 12;
-    if (total > CHAT_MAX_CHARS) {
-      break;
+    if (sessionId) {
+      localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+    } else {
+      localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
     }
-    keptRev.push(msg);
-  }
-  keptRev.reverse();
-  return keptRev;
-}
-
-function saveChatHistory(history) {
-  try {
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(pruneChatHistory(history)));
   } catch (_err) {
     // Ignore storage errors
   }
 }
 
-function clearChatHistory() {
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let payload = {};
   try {
-    localStorage.removeItem(CHAT_STORAGE_KEY);
+    payload = text ? JSON.parse(text) : {};
   } catch (_err) {
-    // ignore
+    payload = {};
   }
+  if (!response.ok) {
+    throw new Error(payload.message || text || "Request failed.");
+  }
+  return payload;
+}
+
+function setActiveSession(session) {
+  const sessionId = normalizeText(session?.id, "");
+  const messages = normalizeMessages(session?.messages);
+  activeSessionId = sessionId || null;
+  activeSessionMessages = messages;
+  writeStoredSessionId(activeSessionId);
+  if (activeSessionId) {
+    const existingIndex = sessionSummaries.findIndex((item) => item.id === activeSessionId);
+    const nextSummary = {
+      id: activeSessionId,
+      title: normalizeText(session?.title, "New Chat") || "New Chat",
+      created_at: Number(session?.created_at) || Date.now() / 1000,
+      updated_at: Number(session?.updated_at) || Date.now() / 1000,
+      message_count: messages.length,
+    };
+    if (existingIndex >= 0) {
+      sessionSummaries[existingIndex] = nextSummary;
+    } else {
+      sessionSummaries.unshift(nextSummary);
+    }
+  }
+  renderSessionList();
+}
+
+function normalizeSessionSummaries(summaries) {
+  if (!Array.isArray(summaries)) return [];
+  return summaries
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      id: normalizeText(item.id, ""),
+      title: normalizeText(item.title, "New Chat") || "New Chat",
+      created_at: Number(item.created_at) || 0,
+      updated_at: Number(item.updated_at) || 0,
+      message_count: Number(item.message_count) || 0,
+    }))
+    .filter((item) => item.id);
+}
+
+function formatRelativeTime(secondsEpoch) {
+  const ts = Number(secondsEpoch);
+  if (!Number.isFinite(ts) || ts <= 0) return "";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (diff < 30) return "just now";
+  if (diff < 3600) return `${Math.max(1, Math.floor(diff / 60))}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
+  return `${Math.floor(diff / (86400 * 7))}w ago`;
+}
+
+function setSessionStatus(message, ok) {
+  setStatus(sessionStatus, message, ok);
+}
+
+function renderSessionList() {
+  if (!sessionList) return;
+  sessionList.innerHTML = "";
+
+  if (!sessionSummaries.length) {
+    const emptyNode = document.createElement("div");
+    emptyNode.className = "session-empty";
+    emptyNode.textContent = "No sessions yet. Start a new one.";
+    sessionList.appendChild(emptyNode);
+    return;
+  }
+
+  for (const summary of sessionSummaries) {
+    const row = document.createElement("div");
+    row.className = `session-item ${summary.id === activeSessionId ? "active" : ""}`.trim();
+
+    const selectBtn = document.createElement("button");
+    selectBtn.type = "button";
+    selectBtn.className = "session-select";
+    selectBtn.title = summary.title;
+
+    const titleNode = document.createElement("span");
+    titleNode.className = "session-title";
+    titleNode.textContent = summary.title;
+    selectBtn.appendChild(titleNode);
+
+    const metaNode = document.createElement("span");
+    metaNode.className = "session-meta";
+    const labelCount = summary.message_count === 1 ? "1 msg" : `${summary.message_count} msgs`;
+    const relativeUpdated = formatRelativeTime(summary.updated_at);
+    metaNode.textContent = relativeUpdated ? `${labelCount} · ${relativeUpdated}` : labelCount;
+    selectBtn.appendChild(metaNode);
+
+    selectBtn.addEventListener("click", async () => {
+      if (summary.id === activeSessionId) return;
+      if (isRunning) {
+        setSessionStatus("Wait for the current run to finish before switching sessions.", false);
+        return;
+      }
+      try {
+        await getSession(summary.id);
+        renderChatHistory(activeSessionMessages);
+        setSessionStatus("", true);
+        setStatus(promptStatus, "", true);
+        scrollChatToBottom({ behavior: "auto", force: true });
+      } catch (error) {
+        setSessionStatus(error.message || "Could not switch sessions.", false);
+      }
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "session-delete";
+    deleteBtn.textContent = "×";
+    deleteBtn.title = "Delete session";
+    deleteBtn.setAttribute("aria-label", `Delete session ${summary.title}`);
+    deleteBtn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isRunning && summary.id === activeSessionId) {
+        setSessionStatus("Wait for the current run to finish before deleting this session.", false);
+        return;
+      }
+      const confirmed = window.confirm(`Delete session "${summary.title}"? This cannot be undone.`);
+      if (!confirmed) return;
+
+      try {
+        await fetchJson(`/api/sessions/${encodeURIComponent(summary.id)}`, { method: "DELETE" });
+        sessionSummaries = sessionSummaries.filter((item) => item.id !== summary.id);
+
+        if (summary.id === activeSessionId) {
+          if (sessionSummaries.length > 0) {
+            await getSession(sessionSummaries[0].id);
+          } else {
+            await createSession();
+          }
+          renderChatHistory(activeSessionMessages);
+        }
+        await refreshSessionSummaries();
+        setSessionStatus("Session deleted.", true);
+      } catch (error) {
+        setSessionStatus(error.message || "Could not delete session.", false);
+      }
+    });
+
+    row.appendChild(selectBtn);
+    row.appendChild(deleteBtn);
+    sessionList.appendChild(row);
+  }
+}
+
+async function refreshSessionSummaries() {
+  const { sessions } = await listSessions();
+  sessionSummaries = normalizeSessionSummaries(sessions);
+  if (activeSessionId && !sessionSummaries.some((item) => item.id === activeSessionId)) {
+    activeSessionId = null;
+    writeStoredSessionId(null);
+  }
+  renderSessionList();
+}
+
+function touchActiveSessionSummary(role, content) {
+  if (!activeSessionId) return;
+  const nowSeconds = Date.now() / 1000;
+  const idx = sessionSummaries.findIndex((item) => item.id === activeSessionId);
+  if (idx < 0) return;
+  const next = { ...sessionSummaries[idx] };
+  next.updated_at = nowSeconds;
+  next.message_count = Math.max(0, Number(next.message_count) || 0) + 1;
+  if ((next.title === "New Chat" || !next.title) && role === "user") {
+    const firstLine = normalizeText(content, "New Chat").split("\n")[0];
+    next.title = firstLine.slice(0, 72) || "New Chat";
+  }
+  sessionSummaries[idx] = next;
+  sessionSummaries.sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+  renderSessionList();
+}
+
+async function listSessions() {
+  const payload = await fetchJson("/api/sessions");
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const lastSessionId = normalizeText(payload.last_session_id, "");
+  return { sessions, lastSessionId: lastSessionId || null };
+}
+
+async function createSession(title = "") {
+  const payload = await fetchJson("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!payload.session || typeof payload.session !== "object") {
+    throw new Error("Invalid create session response.");
+  }
+  setActiveSession(payload.session);
+  return payload.session;
+}
+
+async function getSession(sessionId) {
+  const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  if (!payload.session || typeof payload.session !== "object") {
+    throw new Error("Invalid session response.");
+  }
+  setActiveSession(payload.session);
+  return payload.session;
+}
+
+async function ensureActiveSession() {
+  const preferredId = readStoredSessionId();
+  if (preferredId) {
+    try {
+      return await getSession(preferredId);
+    } catch (_err) {
+      // Fall through to fallback strategy
+    }
+  }
+
+  const { sessions, lastSessionId } = await listSessions();
+  sessionSummaries = normalizeSessionSummaries(sessions);
+  renderSessionList();
+  if (lastSessionId) {
+    try {
+      return await getSession(lastSessionId);
+    } catch (_err) {
+      // Fall through to first available session
+    }
+  }
+  if (sessions.length > 0) {
+    return getSession(sessions[0].id);
+  }
+  return createSession();
 }
 
 function isNearBottom(thresholdPx = 220) {
@@ -613,11 +828,11 @@ function parseSseFrame(rawFrame) {
   return { type: eventName, payload: payload };
 }
 
-async function runPromptStream({ prompt, history, run }) {
+async function runPromptStream({ prompt, sessionId, run }) {
   const response = await fetch("/api/prompt/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, history }),
+    body: JSON.stringify({ prompt, session_id: sessionId }),
   });
 
   if (!response.ok) {
@@ -704,6 +919,9 @@ keyForm?.addEventListener("submit", async (event) => {
   setStatus(keyStatus, "Connecting to gateway...", true);
   try {
     await verifyGateway(value, keyStatus);
+    await ensureActiveSession();
+    await refreshSessionSummaries();
+    renderChatHistory(activeSessionMessages);
     setUnlocked(true);
     resizePromptInput();
     promptInput?.focus();
@@ -713,13 +931,22 @@ keyForm?.addEventListener("submit", async (event) => {
   }
 });
 
-clearChatBtn?.addEventListener("click", () => {
-  const ok = window.confirm("Clear chat history on this device?");
-  if (!ok) return;
-  clearChatHistory();
-  renderChatHistory([]);
-  setStatus(promptStatus, "", true);
-  promptInput?.focus();
+newSessionBtn?.addEventListener("click", async () => {
+  if (isRunning) {
+    setSessionStatus("Wait for the current run to finish before creating a new session.", false);
+    return;
+  }
+  try {
+    await createSession();
+    await refreshSessionSummaries();
+    renderChatHistory(activeSessionMessages);
+    setStatus(promptStatus, "Started a new session.", true);
+    setSessionStatus("", true);
+    promptInput?.focus();
+    scrollChatToBottom({ behavior: "auto", force: true });
+  } catch (error) {
+    setSessionStatus(error.message || "Could not create a new session.", false);
+  }
 });
 
 promptForm?.addEventListener("submit", async (event) => {
@@ -733,14 +960,21 @@ promptForm?.addEventListener("submit", async (event) => {
     return;
   }
 
-  const history = loadChatHistory();
+  if (!activeSessionId) {
+    try {
+      await ensureActiveSession();
+    } catch (error) {
+      setStatus(promptStatus, error.message || "Could not initialize session.", false);
+      return;
+    }
+  }
   const run = createRunUI(prompt);
 
   run.commitAssistant = (text) => {
     if (run.committedAssistant) return;
-    const current = loadChatHistory();
-    current.push({ role: "assistant", content: normalizeText(text, ""), ts: Date.now() });
-    saveChatHistory(current);
+    const normalized = normalizeText(text, "");
+    activeSessionMessages.push({ role: "assistant", content: normalized, ts: Date.now() });
+    touchActiveSessionSummary("assistant", normalized);
     run.committedAssistant = true;
   };
 
@@ -748,8 +982,8 @@ promptForm?.addEventListener("submit", async (event) => {
   chatThread?.appendChild(run.assistantMsg.wrapper);
   scrollChatToBottom({ behavior: "smooth", force: true });
 
-  history.push({ role: "user", content: prompt, ts: Date.now() });
-  saveChatHistory(history);
+  activeSessionMessages.push({ role: "user", content: prompt, ts: Date.now() });
+  touchActiveSessionSummary("user", prompt);
 
   promptInput.value = "";
   resizePromptInput();
@@ -758,8 +992,7 @@ promptForm?.addEventListener("submit", async (event) => {
   setStatus(promptStatus, "Starting Cobra Lite run...", true);
 
   try {
-    const historyForBackend = pruneChatHistory(history).slice(0, -1);
-    const ok = await runPromptStream({ prompt, history: historyForBackend, run });
+    const ok = await runPromptStream({ prompt, sessionId: activeSessionId, run });
     if (ok) {
       setStatus(promptStatus, "Run complete.", true);
       if (!run.committedAssistant) {
@@ -774,6 +1007,11 @@ promptForm?.addEventListener("submit", async (event) => {
       run.commitAssistant(`Error: ${error.message}`);
     }
   } finally {
+    try {
+      await refreshSessionSummaries();
+    } catch (_err) {
+      // Ignore sidebar refresh errors after prompt completion.
+    }
     setRunningState(false);
     promptInput?.focus();
   }
@@ -825,13 +1063,26 @@ settingsForm?.addEventListener("submit", async (event) => {
   }
 });
 
-setUnlocked(hasGateway);
-renderChatHistory(loadChatHistory());
-resizePromptInput();
-scrollChatToBottom({ behavior: "auto", force: true });
-ensureJumpLatestButton();
-updateAutoScrollEnabled();
-window.addEventListener("scroll", updateAutoScrollEnabled, { passive: true });
-if (hasGateway) {
-  promptInput?.focus();
+async function bootstrap() {
+  setUnlocked(hasGateway);
+  if (hasGateway) {
+    try {
+      await ensureActiveSession();
+      await refreshSessionSummaries();
+    } catch (error) {
+      setStatus(promptStatus, error.message || "Could not load session.", false);
+    }
+  }
+  renderSessionList();
+  renderChatHistory(activeSessionMessages);
+  resizePromptInput();
+  scrollChatToBottom({ behavior: "auto", force: true });
+  ensureJumpLatestButton();
+  updateAutoScrollEnabled();
+  window.addEventListener("scroll", updateAutoScrollEnabled, { passive: true });
+  if (hasGateway) {
+    promptInput?.focus();
+  }
 }
+
+bootstrap();

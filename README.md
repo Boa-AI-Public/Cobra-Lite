@@ -137,17 +137,6 @@ ClawBot can:
 │  Tools  │   │  Tools  │
 └─────────┘   └─────────┘
 ```
-
-## Security & Responsibility
-
-⚠️ **Important**: This tool is for **authorized security testing only**.
-
-- Only test systems you own or have explicit permission to test
-- Respect bug bounty program rules and scope
-- Be aware of rate limits and avoid causing service disruption
-- Document all findings responsibly
-- Never use for malicious purposes
-
 ## Troubleshooting
 
 ### No Tools Available
@@ -165,7 +154,7 @@ go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 
 To add custom security workflows:
 
-1. Modify the `security_context` in `app.py` to guide the agent
+1. Modify `SECURITY_CONTEXT` in `cobra_lite/config.py` to guide the agent
 2. Add custom prompts or templates
 3. Integrate additional tools via OpenClaw skills
 
@@ -175,6 +164,17 @@ The app communicates with OpenClaw Gateway via:
 - `POST /api/chat` - Send messages and receive streaming responses
 - Tool calls and results are handled by OpenClaw automatically
 
+## Security & Responsibility
+
+⚠️ **Important**: This tool is for **authorized security testing only**.
+
+- Only test systems you own or have explicit permission to test
+- Respect bug bounty program rules and scope
+- Be aware of rate limits and avoid causing service disruption
+- Document all findings responsibly
+- Never use for malicious purposes
+
+
 ## Contributing
 
 Built on top of OpenClaw. For issues or contributions:
@@ -183,4 +183,3 @@ Built on top of OpenClaw. For issues or contributions:
 - ClawBot: Create issues in this repo
 
 **Made with 🦅 by the OpenClaw community**
-
