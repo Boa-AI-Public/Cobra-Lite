@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cobra Lite | Security Testing Interface</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <div class="grid-bg" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo-shell">
+          <img
+            class="brand-logo"
+            src="{{ url_for('static', filename='images/boa-logo-bw.svg') }}"
+            alt="Cobra Lite logo"
+          />
+        </div>
+        <div class="brand-copy">
+          <span class="brand-mark">Cobra Lite</span>
+          <span class="brand-sub">Security Testing Interface</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">
+          &#9881;
+        </button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <p class="chip">COBRA LITE WORKBENCH</p>
+        <h1>
+          Launch <span>Cobra Lite</span>
+          <br />
+          your security testing agent
+        </h1>
+        <p class="hero-sub">
+          Connect your local gateway once, then run guided security testing tasks with live execution telemetry.
+        </p>
+      </section>
+
+      <section id="key-gate" class="panel token-panel {% if has_gateway %}hidden{% endif %}">
+        <h2>Connect to Gateway</h2>
+        <p class="panel-sub">
+          Enter your gateway URL. The default is <code>{{ default_gateway_url }}</code> for local instances.
+          <span class="help-wrap">
+            <button type="button" class="help-icon" aria-label="What is this?">?</button>
+            <span class="help-popup">
+              Gateway is the local service that powers automation, tools, and session orchestration for this UI.
+              <a href="https://docs.openclaw.ai" target="_blank" rel="noopener noreferrer">
+                Documentation
+              </a>
+            </span>
+          </span>
+        </p>
+        <form id="key-form" class="stack-form" autocomplete="off">
+          <label for="api-key-input" class="sr-only">Gateway URL</label>
+          <input
+            id="api-key-input"
+            name="gateway_url"
+            type="text"
+            placeholder="{{ default_gateway_url }}"
+            value="{{ saved_gateway_url }}"
+            required
+          />
+          <button class="cta-btn" type="submit">Connect</button>
+        </form>
+        <p id="key-status" class="status-text" aria-live="polite"></p>
+      </section>
+
+      <section id="main-app" class="panel prompt-panel {% if not has_gateway %}hidden{% endif %}">
+        <div class="prompt-header">
+          <div class="prompt-title-row">
+            <h2>Chat with Cobra Lite</h2>
+            <button id="clear-chat-btn" class="ghost-btn" type="button">Clear chat</button>
+          </div>
+          <p>Enter to send. Use Shift+Enter for a new line.</p>
+        </div>
+        <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
+      </section>
+
+      <section id="composer-dock" class="composer-dock {% if not has_gateway %}hidden{% endif %}">
+        <form id="prompt-form" class="prompt-form">
+          <label for="prompt-input" class="sr-only">Prompt</label>
+          <div class="prompt-composer">
+            <textarea
+              id="prompt-input"
+              name="prompt"
+              rows="1"
+              placeholder="Describe your security testing task..."
+              required
+            ></textarea>
+            <button class="cta-btn prompt-submit" type="submit">Send</button>
+          </div>
+        </form>
+        <p id="prompt-status" class="status-text" aria-live="polite"></p>
+      </section>
+
+      <p class="tool-attribution">Cobra Lite</p>
+    </main>
+
+    <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="settings-title">Update Gateway URL</h3>
+          <button id="close-settings" class="icon-btn" type="button" aria-label="Close settings">&times;</button>
+        </div>
+        <form id="settings-form" class="stack-form" autocomplete="off">
+          <label for="settings-key-input" class="sr-only">New Gateway URL</label>
+          <input
+            id="settings-key-input"
+            name="gateway_url"
+            type="text"
+            placeholder="{{ default_gateway_url }}"
+            required
+          />
+          <button class="cta-btn" type="submit">Save URL</button>
+        </form>
+        <p id="settings-status" class="status-text" aria-live="polite"></p>
+      </div>
+    </div>
+
+    <script>
+      window.CLAW_HAS_GATEWAY = {{ "true" if has_gateway else "false" }};
+      window.CLAW_DEFAULT_GATEWAY_URL = {{ default_gateway_url | tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

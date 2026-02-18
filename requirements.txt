@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+python-dotenv>=1.0,<2
+websockets>=12,<16
+cryptography>=42,<46
