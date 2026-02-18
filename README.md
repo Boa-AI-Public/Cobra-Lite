@@ -1,4 +1,4 @@
-# ClawBot Pentester 🦅🔐
+# ClawBot Pentester 🐍🔐
 
 A web-based security testing interface powered by **OpenClaw** - your AI-driven penetration testing assistant.
 
@@ -182,4 +182,4 @@ Built on top of OpenClaw. For issues or contributions:
 - OpenClaw: https://github.com/openclaw/openclaw
 - ClawBot: Create issues in this repo
 
-**Made with 🦅 by the OpenClaw community**
+**Made with 🐍 by the OpenClaw community**
