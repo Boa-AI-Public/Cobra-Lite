@@ -1,10 +1,10 @@
-# Cobra Lite - A ClawBot Hacking Copilot 🐍🔐
+# Cobra Lite - An OpenClaw Hacking Copilot 🐍🔐
 
 A web-based security testing interface powered by **OpenClaw** - your AI-driven penetration testing assistant.
 
 ## What It Does
 
-ClawBot Pentester provides a chat-style interface for security testing tasks, leveraging OpenClaw's powerful agent system which includes:
+Cobra Lite provides a chat-style interface for security testing tasks, leveraging OpenClaw's powerful agent system which includes:
 
 - **Browser Automation** - Test web applications, forms, authentication flows, session handling
 - **Terminal Execution** - Run security tools like nmap, nuclei, nikto, ffuf, curl, and more
@@ -28,7 +28,7 @@ ClawBot Pentester provides a chat-style interface for security testing tasks, le
 
 ```bash
 # Clone or navigate to the project
-cd claw-bot-pentester
+cd Cobra-Lite
 
 # Install dependencies
 python -m pip install -r requirements.txt
@@ -110,7 +110,7 @@ Through OpenClaw, you get:
 
 ### Multi-Agent Architecture
 
-ClawBot can:
+Cobra Lite can:
 - Spawn sub-agents for parallel testing
 - Coordinate different phases (recon → scanning → exploitation)
 - Aggregate results from multiple tools
@@ -120,7 +120,7 @@ ClawBot can:
 
 ```
 ┌─────────────────────────┐
-│   ClawBot Web UI        │
+│   Cobra Lite Web UI     │
 │   (Flask + JavaScript)  │
 └───────────┬─────────────┘
             │ HTTP
@@ -180,6 +180,6 @@ The app communicates with OpenClaw Gateway via:
 Built on top of OpenClaw. For issues or contributions:
 
 - OpenClaw: https://github.com/openclaw/openclaw
-- ClawBot: Create issues in this repo
+- Cobra Lite: Create issues in this repo
 
 **Made with 🐍 by the OpenClaw community**
