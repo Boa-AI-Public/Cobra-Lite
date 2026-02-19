@@ -1,4 +1,5 @@
 const hasGateway = window.CLAW_HAS_GATEWAY === true;
+const hasAnthropicKey = window.CLAW_HAS_ANTHROPIC_KEY === true;
 const defaultGatewayUrl = window.CLAW_DEFAULT_GATEWAY_URL || "http://127.0.0.1:18789";
 
 const keyGate = document.getElementById("key-gate");
@@ -9,6 +10,12 @@ const sessionPane = document.getElementById("session-pane");
 const sessionList = document.getElementById("session-list");
 const sessionStatus = document.getElementById("session-status");
 const newSessionBtn = document.getElementById("new-session-btn");
+const executionPane = document.getElementById("execution-pane");
+const executionFeed = document.getElementById("execution-feed");
+const executionTerminalView = document.getElementById("execution-terminal-view");
+const executionGraphView = document.getElementById("execution-graph-view");
+const executionTabTerminal = document.getElementById("execution-tab-terminal");
+const executionTabGraph = document.getElementById("execution-tab-graph");
 
 const keyForm = document.getElementById("key-form");
 const keyInput = document.getElementById("api-key-input");
@@ -26,6 +33,11 @@ const settingsForm = document.getElementById("settings-form");
 const settingsKeyInput = document.getElementById("settings-key-input");
 const settingsStatus = document.getElementById("settings-status");
 
+const authModal = document.getElementById("auth-modal");
+const authForm = document.getElementById("auth-form");
+const authKeyInput = document.getElementById("auth-key-input");
+const authStatus = document.getElementById("auth-status");
+
 let isRunning = false;
 let autoScrollEnabled = true;
 let unseenEventCount = 0;
@@ -35,6 +47,7 @@ const ACTIVE_SESSION_STORAGE_KEY = "cobraLite.activeSessionId.v1";
 let activeSessionId = null;
 let activeSessionMessages = [];
 let sessionSummaries = [];
+let anthropicConfigured = hasAnthropicKey;
 
 function decodeEscapedSequences(text) {
   if (!text || !text.includes("\\")) {
@@ -83,6 +96,192 @@ function normalizeText(value, fallback = "", options = {}) {
   return normalized;
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sanitizeMarkdownUrl(rawUrl) {
+  const source = String(rawUrl || "").trim().replace(/&amp;/g, "&");
+  if (!source) return "";
+  try {
+    const parsed = new URL(source, window.location.origin);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === "http:" || protocol === "https:" || protocol === "mailto:") {
+      return parsed.href;
+    }
+  } catch (_err) {
+    return "";
+  }
+  return "";
+}
+
+function renderInlineMarkdown(sourceText) {
+  if (!sourceText) return "";
+  let working = escapeHtml(sourceText);
+  const codeTokens = [];
+
+  working = working.replace(/`([^`]+)`/g, (_match, codeInner) => {
+    const token = `@@CODE_${codeTokens.length}@@`;
+    codeTokens.push(`<code>${codeInner}</code>`);
+    return token;
+  });
+
+  working = working.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, url) => {
+    const safeHref = sanitizeMarkdownUrl(url);
+    if (!safeHref) {
+      return label;
+    }
+    return `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+
+  working = working.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  working = working.replace(/(^|[\s(])\*([^*]+)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>");
+
+  working = working.replace(/@@CODE_(\d+)@@/g, (_match, idx) => codeTokens[Number(idx)] || "");
+  return working;
+}
+
+function renderMarkdown(markdownText) {
+  const text = normalizeText(markdownText, "");
+  if (!text) return "";
+
+  const lines = text.split("\n");
+  const htmlParts = [];
+  let paragraphLines = [];
+  let inUl = false;
+  let inOl = false;
+  let inCode = false;
+  let codeLang = "";
+  let codeLines = [];
+
+  const closeLists = () => {
+    if (inUl) {
+      htmlParts.push("</ul>");
+      inUl = false;
+    }
+    if (inOl) {
+      htmlParts.push("</ol>");
+      inOl = false;
+    }
+  };
+
+  const flushParagraph = () => {
+    if (!paragraphLines.length) return;
+    const paragraphHtml = paragraphLines.map((line) => renderInlineMarkdown(line)).join("<br />");
+    htmlParts.push(`<p>${paragraphHtml}</p>`);
+    paragraphLines = [];
+  };
+
+  const flushCode = () => {
+    const escapedCode = escapeHtml(codeLines.join("\n"));
+    const langClass = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
+    htmlParts.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
+    inCode = false;
+    codeLang = "";
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    if (inCode) {
+      if (/^```/.test(line.trim())) {
+        flushCode();
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
+    const fenceMatch = line.match(/^```+\s*([^`\s]*)\s*$/);
+    if (fenceMatch) {
+      flushParagraph();
+      closeLists();
+      inCode = true;
+      codeLang = String(fenceMatch[1] || "").trim();
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      closeLists();
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      closeLists();
+      const level = headingMatch[1].length;
+      const headingBody = renderInlineMarkdown(headingMatch[2]);
+      htmlParts.push(`<h${level}>${headingBody}</h${level}>`);
+      continue;
+    }
+
+    const ulMatch = line.match(/^\s*[-*+]\s+(.*)$/);
+    if (ulMatch) {
+      flushParagraph();
+      if (inOl) {
+        htmlParts.push("</ol>");
+        inOl = false;
+      }
+      if (!inUl) {
+        htmlParts.push("<ul>");
+        inUl = true;
+      }
+      htmlParts.push(`<li>${renderInlineMarkdown(ulMatch[1])}</li>`);
+      continue;
+    }
+
+    const olMatch = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (olMatch) {
+      flushParagraph();
+      if (inUl) {
+        htmlParts.push("</ul>");
+        inUl = false;
+      }
+      if (!inOl) {
+        htmlParts.push("<ol>");
+        inOl = true;
+      }
+      htmlParts.push(`<li>${renderInlineMarkdown(olMatch[1])}</li>`);
+      continue;
+    }
+
+    if (inUl || inOl) {
+      closeLists();
+    }
+    paragraphLines.push(line.trimEnd());
+  }
+
+  if (inCode) {
+    flushCode();
+  }
+  flushParagraph();
+  closeLists();
+
+  return htmlParts.join("\n");
+}
+
+function getMarkdownSource(node) {
+  if (!node) return "";
+  const stored = node.dataset.rawMarkdown;
+  if (typeof stored === "string") {
+    return stored;
+  }
+  return normalizeText(node.textContent, "");
+}
+
+function setMarkdownContent(node, value) {
+  if (!node) return;
+  const normalized = normalizeText(value, "");
+  node.dataset.rawMarkdown = normalized;
+  node.innerHTML = normalized ? renderMarkdown(normalized) : "";
+}
+
 function resizePromptInput() {
   if (!promptInput) return;
   promptInput.style.height = "0px";
@@ -105,6 +304,7 @@ function setUnlocked(unlocked) {
   mainApp?.classList.toggle("hidden", !unlocked);
   composerDock?.classList.toggle("hidden", !unlocked);
   sessionPane?.classList.toggle("hidden", !unlocked);
+  executionPane?.classList.toggle("hidden", !unlocked);
   document.body.classList.toggle("sidebar-enabled", unlocked);
 }
 
@@ -163,9 +363,109 @@ async function fetchJson(url, options = {}) {
     payload = {};
   }
   if (!response.ok) {
-    throw new Error(payload.message || text || "Request failed.");
+    const err = new Error(payload.message || text || "Request failed.");
+    if (payload && typeof payload === "object") {
+      err.code = payload.code;
+      err.provider = payload.provider;
+    }
+    throw err;
   }
   return payload;
+}
+
+function isMissingAnthropicKeyError(error) {
+  if (!error) return false;
+  if (error.code === "missing_provider_key") {
+    return (error.provider || "").toLowerCase() === "anthropic";
+  }
+  const message = normalizeText(error.message, "").toLowerCase();
+  return message.includes('no api key found for provider "anthropic"');
+}
+
+function openAuthModal(message = "") {
+  if (!authModal) return;
+  authModal.classList.remove("hidden");
+  setStatus(authStatus, message || "", false);
+  if (authKeyInput) {
+    authKeyInput.focus();
+  }
+}
+
+function closeAuthModal() {
+  authModal?.classList.add("hidden");
+  setStatus(authStatus, "", true);
+}
+
+async function refreshAuthStatus() {
+  const payload = await fetchJson("/api/auth-status");
+  const configured = payload?.providers?.anthropic?.configured === true;
+  anthropicConfigured = configured;
+  return configured;
+}
+
+async function ensureAnthropicKeyConfigured({ showModal = false } = {}) {
+  if (anthropicConfigured) {
+    return true;
+  }
+  const configured = await refreshAuthStatus();
+  if (!configured && showModal) {
+    openAuthModal("Add your Anthropic key to continue.");
+  }
+  return configured;
+}
+
+function showExecutionTab(tab) {
+  const showTerminal = tab !== "graph";
+  executionTerminalView?.classList.toggle("hidden", !showTerminal);
+  executionGraphView?.classList.toggle("hidden", showTerminal);
+  executionTabTerminal?.classList.toggle("active", showTerminal);
+  executionTabGraph?.classList.toggle("active", !showTerminal);
+  executionTabTerminal?.setAttribute("aria-selected", showTerminal ? "true" : "false");
+  executionTabGraph?.setAttribute("aria-selected", showTerminal ? "false" : "true");
+}
+
+function scrollExecutionToBottom() {
+  if (!executionFeed) return;
+  executionFeed.scrollTop = executionFeed.scrollHeight;
+}
+
+function createExecutionRunShell(promptText) {
+  if (!executionFeed) {
+    return { streamEvents: null };
+  }
+  executionFeed.innerHTML = "";
+
+  const runShell = document.createElement("section");
+  runShell.className = "terminal-run";
+
+  const runMeta = document.createElement("div");
+  runMeta.className = "terminal-run-meta";
+  runMeta.textContent = `Run started · ${new Date().toLocaleTimeString()}`;
+  runShell.appendChild(runMeta);
+
+  const runPrompt = document.createElement("div");
+  runPrompt.className = "terminal-run-prompt markdown-content";
+  setMarkdownContent(runPrompt, `**Prompt**\n${normalizeText(promptText, "")}`);
+  runShell.appendChild(runPrompt);
+
+  const streamEvents = document.createElement("div");
+  streamEvents.className = "stream-events terminal-stream";
+  runShell.appendChild(streamEvents);
+
+  executionFeed.appendChild(runShell);
+  showExecutionTab("terminal");
+  scrollExecutionToBottom();
+
+  return { streamEvents };
+}
+
+function renderExecutionEmpty(message = "Run a prompt to stream terminal output.") {
+  if (!executionFeed) return;
+  executionFeed.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "execution-empty";
+  empty.textContent = message;
+  executionFeed.appendChild(empty);
 }
 
 function setActiveSession(session) {
@@ -190,6 +490,7 @@ function setActiveSession(session) {
     }
   }
   renderSessionList();
+  renderExecutionEmpty("Run a prompt to stream terminal output.");
 }
 
 function normalizeSessionSummaries(summaries) {
@@ -395,8 +696,8 @@ async function ensureActiveSession() {
 }
 
 function isNearBottom(thresholdPx = 220) {
-  const doc = document.documentElement;
-  const distance = doc.scrollHeight - (window.scrollY + window.innerHeight);
+  if (!chatThread) return true;
+  const distance = chatThread.scrollHeight - (chatThread.scrollTop + chatThread.clientHeight);
   return distance <= thresholdPx;
 }
 
@@ -414,12 +715,11 @@ function scrollChatToBottom(options = {}) {
     return;
   }
   if (!chatThread) return;
-  const last = chatThread.lastElementChild;
-  if (!last || typeof last.scrollIntoView !== "function") return;
-  last.scrollIntoView({
-    block: "end",
-    behavior: options.behavior || "auto",
-  });
+  if ((options.behavior || "auto") === "smooth" && typeof chatThread.scrollTo === "function") {
+    chatThread.scrollTo({ top: chatThread.scrollHeight, behavior: "smooth" });
+    return;
+  }
+  chatThread.scrollTop = chatThread.scrollHeight;
 }
 
 function ensureJumpLatestButton() {
@@ -449,9 +749,9 @@ function createChatMessageNode({ role, content }) {
   meta.textContent = role === "assistant" ? "Cobra Lite" : "You";
   wrapper.appendChild(meta);
 
-  const bubble = document.createElement("pre");
-  bubble.className = "chat-bubble";
-  bubble.textContent = normalizeText(content, "");
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble markdown-content";
+  setMarkdownContent(bubble, content);
   wrapper.appendChild(bubble);
 
   return { wrapper, bubble };
@@ -469,37 +769,14 @@ function renderChatHistory(history) {
 
 function createRunUI(promptText) {
   const userMsg = createChatMessageNode({ role: "user", content: promptText });
-  const assistantMsg = createChatMessageNode({ role: "assistant", content: "(running...)" });
-
-  const details = document.createElement("details");
-  details.className = "run-details";
-  details.open = true;
-
-  const summary = document.createElement("summary");
-  summary.textContent = "Run details";
-  details.appendChild(summary);
-
-  const body = document.createElement("div");
-  body.className = "run-details-body";
-  details.appendChild(body);
-
-  const eventsSection = document.createElement("div");
-  eventsSection.className = "stream-section";
-  const eventsTitle = document.createElement("h3");
-  eventsTitle.textContent = "Live execution";
-  eventsSection.appendChild(eventsTitle);
-  const streamEvents = document.createElement("div");
-  streamEvents.className = "stream-events";
-  eventsSection.appendChild(streamEvents);
-  body.appendChild(eventsSection);
-
-  assistantMsg.wrapper.appendChild(details);
+  const assistantMsg = createChatMessageNode({ role: "assistant", content: "" });
+  const terminalRun = createExecutionRunShell(promptText);
 
   return {
     userMsg,
     assistantMsg,
-    details,
-    streamEvents,
+    assistantInserted: false,
+    streamEvents: terminalRun.streamEvents,
     runningExecutionBlocks: new Map(),
     reasoningLiveNode: null,
     committedAssistant: false,
@@ -507,9 +784,16 @@ function createRunUI(promptText) {
   };
 }
 
+function ensureAssistantNode(run) {
+  if (!run || !run.assistantMsg || run.assistantInserted) return;
+  chatThread?.appendChild(run.assistantMsg.wrapper);
+  run.assistantInserted = true;
+}
+
 function setAssistantBubble(run, content) {
   if (!run || !run.assistantMsg || !run.assistantMsg.bubble) return;
-  run.assistantMsg.bubble.textContent = normalizeText(content, "");
+  ensureAssistantNode(run);
+  setMarkdownContent(run.assistantMsg.bubble, content);
 }
 
 function appendStreamEvent(run, content, kind) {
@@ -518,16 +802,13 @@ function appendStreamEvent(run, content, kind) {
   block.className = `stream-event ${kind || ""}`.trim();
 
   const safeContent = normalizeText(content, "");
-  if (safeContent.includes("\n")) {
-    const pre = document.createElement("pre");
-    pre.className = "stream-event-multi";
-    pre.textContent = safeContent;
-    block.appendChild(pre);
-  } else {
-    block.textContent = safeContent;
-  }
+  const body = document.createElement("div");
+  body.className = "stream-event-body markdown-content";
+  setMarkdownContent(body, safeContent);
+  block.appendChild(body);
 
   run.streamEvents.appendChild(block);
+  scrollExecutionToBottom();
 }
 
 function createCommandBlock({ stepIndex, toolName, command, rationale, isRunning }) {
@@ -556,9 +837,9 @@ function createCommandBlock({ stepIndex, toolName, command, rationale, isRunning
     details.appendChild(rationaleLine);
   }
 
-  const outputNode = document.createElement("pre");
-  outputNode.className = "command-output";
-  outputNode.textContent = isRunning ? "(running...)" : "";
+  const outputNode = document.createElement("div");
+  outputNode.className = "command-output markdown-content";
+  setMarkdownContent(outputNode, isRunning ? "(running...)" : "");
   details.appendChild(outputNode);
 
   return {
@@ -591,6 +872,7 @@ function appendCommandStart(run, data) {
   }
 
   run.streamEvents.appendChild(blockRef.details);
+  scrollExecutionToBottom();
 }
 
 function appendCommandExecution(run, data) {
@@ -616,8 +898,12 @@ function appendCommandExecution(run, data) {
       }
       runningBlock.rationaleLine.textContent = `Rationale: ${rationale}`;
     }
-    runningBlock.outputNode.textContent = mergeCommandOutput(runningBlock.outputNode.textContent, output);
+    setMarkdownContent(
+      runningBlock.outputNode,
+      mergeCommandOutput(getMarkdownSource(runningBlock.outputNode), output)
+    );
     run.runningExecutionBlocks.delete(executionId);
+    scrollExecutionToBottom();
     return;
   }
 
@@ -628,8 +914,9 @@ function appendCommandExecution(run, data) {
     rationale,
     isRunning: false,
   });
-  blockRef.outputNode.textContent = output;
+  setMarkdownContent(blockRef.outputNode, output);
   run.streamEvents.appendChild(blockRef.details);
+  scrollExecutionToBottom();
 }
 
 function mergeCommandOutput(existingText, incomingText) {
@@ -676,12 +963,13 @@ function ensureReasoningLiveNode(run) {
   summary.textContent = "Agent notes (live)";
   details.appendChild(summary);
 
-  const outputNode = document.createElement("pre");
-  outputNode.className = "stream-event-multi";
-  outputNode.textContent = "";
+  const outputNode = document.createElement("div");
+  outputNode.className = "stream-event-multi markdown-content";
+  setMarkdownContent(outputNode, "");
   details.appendChild(outputNode);
 
   run.streamEvents.appendChild(details);
+  scrollExecutionToBottom();
   run.reasoningLiveNode = { details, outputNode };
   return run.reasoningLiveNode;
 }
@@ -693,7 +981,11 @@ function appendCommandUpdate(run, data) {
   if (!output) return;
 
   if (runningBlock) {
-    runningBlock.outputNode.textContent = mergeCommandOutput(runningBlock.outputNode.textContent, output);
+    setMarkdownContent(
+      runningBlock.outputNode,
+      mergeCommandOutput(getMarkdownSource(runningBlock.outputNode), output)
+    );
+    scrollExecutionToBottom();
     return;
   }
 
@@ -708,12 +1000,16 @@ function appendCommandUpdate(run, data) {
     rationale,
     isRunning: true,
   });
-  blockRef.outputNode.textContent = mergeCommandOutput(blockRef.outputNode.textContent, output);
+  setMarkdownContent(
+    blockRef.outputNode,
+    mergeCommandOutput(getMarkdownSource(blockRef.outputNode), output)
+  );
   if (executionId) {
     blockRef.details.dataset.executionId = executionId;
     run.runningExecutionBlocks.set(executionId, blockRef);
   }
   run.streamEvents.appendChild(blockRef.details);
+  scrollExecutionToBottom();
 }
 
 function handleStreamEvent(type, data, run) {
@@ -737,15 +1033,15 @@ function handleStreamEvent(type, data, run) {
       const text = normalizeText(data.text, "");
       if (text) {
         const ref = ensureReasoningLiveNode(run);
-        ref.outputNode.textContent = mergeIncrementalText(ref.outputNode.textContent, text);
+        setMarkdownContent(
+          ref.outputNode,
+          mergeIncrementalText(getMarkdownSource(ref.outputNode), text)
+        );
       }
       break;
     }
     case "assistant_delta": {
-      const text = normalizeText(data.text, "");
-      if (text) {
-        setAssistantBubble(run, text);
-      }
+      // Keep center chat focused on final assistant output only.
       break;
     }
     case "run_status":
@@ -770,6 +1066,12 @@ function handleStreamEvent(type, data, run) {
       break;
     case "error": {
       const message = normalizeText(data.message, "Backend error while running prompt.");
+      const code = normalizeText(data.code, "");
+      const provider = normalizeText(data.provider, "").toLowerCase();
+      if (code === "missing_provider_key" && provider === "anthropic") {
+        anthropicConfigured = false;
+        openAuthModal("Add your Anthropic key, then resend your prompt.");
+      }
       setStatus(promptStatus, message, false);
       appendStreamEvent(run, `ERROR: ${message}`, "note");
       if (!run.committedAssistant) {
@@ -783,9 +1085,6 @@ function handleStreamEvent(type, data, run) {
         setStatus(promptStatus, data.message || "Run ended with errors.", false);
       } else {
         setStatus(promptStatus, "Run complete.", true);
-      }
-      if (run.details) {
-        run.details.open = false;
       }
       break;
     default:
@@ -838,13 +1137,20 @@ async function runPromptStream({ prompt, sessionId, run }) {
   if (!response.ok) {
     const text = await response.text();
     let message = "Prompt submission failed.";
+    let code = "";
+    let provider = "";
     try {
       const data = JSON.parse(text);
       message = data.message || message;
+      code = data.code || "";
+      provider = data.provider || "";
     } catch (_err) {
       message = text || message;
     }
-    throw new Error(message);
+    const err = new Error(message);
+    err.code = code;
+    err.provider = provider;
+    throw err;
   }
 
   if (!response.body) {
@@ -921,6 +1227,7 @@ keyForm?.addEventListener("submit", async (event) => {
     await verifyGateway(value, keyStatus);
     await ensureActiveSession();
     await refreshSessionSummaries();
+    await ensureAnthropicKeyConfigured({ showModal: true });
     renderChatHistory(activeSessionMessages);
     setUnlocked(true);
     resizePromptInput();
@@ -928,6 +1235,32 @@ keyForm?.addEventListener("submit", async (event) => {
     scrollChatToBottom({ behavior: "smooth", force: true });
   } catch (error) {
     setStatus(keyStatus, error.message, false);
+  }
+});
+
+authForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const value = authKeyInput?.value?.trim() || "";
+  if (!value) {
+    setStatus(authStatus, "Please enter your Anthropic API key.", false);
+    return;
+  }
+  setStatus(authStatus, "Saving Anthropic key...", true);
+  try {
+    await fetchJson("/api/auth/anthropic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: value }),
+    });
+    anthropicConfigured = true;
+    if (authKeyInput) {
+      authKeyInput.value = "";
+    }
+    closeAuthModal();
+    setStatus(promptStatus, "Anthropic key saved. You can run prompts now.", true);
+    promptInput?.focus();
+  } catch (error) {
+    setStatus(authStatus, error.message || "Could not save API key.", false);
   }
 });
 
@@ -968,6 +1301,16 @@ promptForm?.addEventListener("submit", async (event) => {
       return;
     }
   }
+  try {
+    const configured = await ensureAnthropicKeyConfigured({ showModal: true });
+    if (!configured) {
+      setStatus(promptStatus, "Anthropic API key required before running prompts.", false);
+      return;
+    }
+  } catch (error) {
+    setStatus(promptStatus, error.message || "Could not verify provider auth.", false);
+    return;
+  }
   const run = createRunUI(prompt);
 
   run.commitAssistant = (text) => {
@@ -979,7 +1322,6 @@ promptForm?.addEventListener("submit", async (event) => {
   };
 
   chatThread?.appendChild(run.userMsg.wrapper);
-  chatThread?.appendChild(run.assistantMsg.wrapper);
   scrollChatToBottom({ behavior: "smooth", force: true });
 
   activeSessionMessages.push({ role: "user", content: prompt, ts: Date.now() });
@@ -996,15 +1338,25 @@ promptForm?.addEventListener("submit", async (event) => {
     if (ok) {
       setStatus(promptStatus, "Run complete.", true);
       if (!run.committedAssistant) {
-        run.commitAssistant(run.assistantMsg.bubble.textContent || "(no response)");
+        const fallback = run.assistantMsg.bubble.textContent || "(no response)";
+        setAssistantBubble(run, fallback);
+        run.commitAssistant(fallback);
       }
     }
   } catch (error) {
-    setStatus(promptStatus, error.message, false);
-    appendStreamEvent(run, `Error: ${error.message}`, "note");
+    if (isMissingAnthropicKeyError(error)) {
+      anthropicConfigured = false;
+      openAuthModal("Add your Anthropic key, then resend your prompt.");
+      setStatus(promptStatus, "Anthropic API key required.", false);
+      appendStreamEvent(run, "Error: Anthropic API key required.", "note");
+    } else {
+      setStatus(promptStatus, error.message, false);
+      appendStreamEvent(run, `Error: ${error.message}`, "note");
+    }
     if (!run.committedAssistant) {
-      setAssistantBubble(run, `Error: ${error.message}`);
-      run.commitAssistant(`Error: ${error.message}`);
+      const message = isMissingAnthropicKeyError(error) ? "Error: Anthropic API key required." : `Error: ${error.message}`;
+      setAssistantBubble(run, message);
+      run.commitAssistant(message);
     }
   } finally {
     try {
@@ -1024,6 +1376,14 @@ promptInput?.addEventListener("keydown", (event) => {
   }
 });
 promptInput?.addEventListener("input", resizePromptInput);
+
+executionTabTerminal?.addEventListener("click", () => {
+  showExecutionTab("terminal");
+});
+
+executionTabGraph?.addEventListener("click", () => {
+  showExecutionTab("graph");
+});
 
 settingsBtn?.addEventListener("click", () => {
   settingsModal.classList.remove("hidden");
@@ -1065,10 +1425,13 @@ settingsForm?.addEventListener("submit", async (event) => {
 
 async function bootstrap() {
   setUnlocked(hasGateway);
+  showExecutionTab("terminal");
+  renderExecutionEmpty();
   if (hasGateway) {
     try {
       await ensureActiveSession();
       await refreshSessionSummaries();
+      await ensureAnthropicKeyConfigured({ showModal: true });
     } catch (error) {
       setStatus(promptStatus, error.message || "Could not load session.", false);
     }
@@ -1079,8 +1442,9 @@ async function bootstrap() {
   scrollChatToBottom({ behavior: "auto", force: true });
   ensureJumpLatestButton();
   updateAutoScrollEnabled();
-  window.addEventListener("scroll", updateAutoScrollEnabled, { passive: true });
-  if (hasGateway) {
+  chatThread?.addEventListener("scroll", updateAutoScrollEnabled, { passive: true });
+  const authModalVisible = !!authModal && !authModal.classList.contains("hidden");
+  if (hasGateway && !authModalVisible) {
     promptInput?.focus();
   }
 }

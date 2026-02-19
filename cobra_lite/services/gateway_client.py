@@ -2,22 +2,30 @@ import asyncio
 import base64
 import json
 import os
+import queue
 import re
+import shutil
 import subprocess
+import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from cobra_lite.config import (
+    COBRA_ALLOW_NONSTREAM_FALLBACK,
     CLI_ONLY_EXTRA_SYSTEM_PROMPT,
     COBRA_EXECUTION_MODE,
+    COBRA_REQUIRE_LIVE_TELEMETRY,
+    COBRA_REQUIRE_TERMINAL_ACTIONS,
     DIAGNOSTIC_EXEC_LINE_RE,
     GATEWAY_SCOPES,
     OPENCLAW_AGENT_TIMEOUT_SECONDS,
     OPENCLAW_DEVICE_AUTH_PATH,
     OPENCLAW_GATEWAY_URL,
     OPENCLAW_IDENTITY_PATH,
+    OPENCLAW_MAIN_AGENT_DIR,
     OPENCLAW_PROTOCOL_VERSION,
     OPENCLAW_SESSION_ID,
     OPENCLAW_SESSION_KEY,
@@ -25,6 +33,12 @@ from cobra_lite.config import (
     REQUEST_TIMEOUT_SECONDS,
     SECURITY_CONTEXT,
 )
+
+MISSING_PROVIDER_KEY_RE = re.compile(r'No API key found for provider\s+"([^"]+)"', re.IGNORECASE)
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+FALLBACK_EXEC_LINE_RE = re.compile(r"^\s*(?:[⚠️❌✅]?\s*)?(?:🛠️\s*)?Exec:", re.IGNORECASE)
+AUTH_STORE_VERSION = 1
+COBRA_ANTHROPIC_PROFILE_ID = "anthropic:cobra-lite"
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -140,10 +154,117 @@ def verify_openclaw_connection(gateway_url: str) -> tuple[bool, str]:
     return False, "Unknown error connecting to gateway."
 
 
+def extract_missing_provider(message: str) -> str | None:
+    text = str(message or "")
+    match = MISSING_PROVIDER_KEY_RE.search(text)
+    if not match:
+        return None
+    provider = (match.group(1) or "").strip().lower()
+    return provider or None
+
+
+def _atomic_write_json(pathname: Path, payload: dict[str, Any]) -> None:
+    pathname.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = pathname.with_suffix(pathname.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(pathname)
+    try:
+        os.chmod(pathname, 0o600)
+    except OSError:
+        pass
+
+
+def _resolve_auth_store_paths() -> list[Path]:
+    candidates: list[Path] = []
+    for env_name in ("OPENCLAW_AGENT_DIR", "PI_CODING_AGENT_DIR"):
+        raw = str(os.getenv(env_name) or "").strip()
+        if raw:
+            candidates.append(Path(raw))
+    candidates.append(OPENCLAW_MAIN_AGENT_DIR)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for agent_dir in candidates:
+        auth_path = (Path(agent_dir).expanduser().resolve() / "auth-profiles.json")
+        key = str(auth_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(auth_path)
+    return deduped
+
+
+def _sync_anthropic_auth_profile(api_key: str) -> bool:
+    key = str(api_key or "").strip()
+    if not key:
+        return False
+
+    desired_profile = {
+        "type": "api_key",
+        "provider": "anthropic",
+        "key": key,
+    }
+    wrote_any = False
+
+    for auth_path in _resolve_auth_store_paths():
+        existing: dict[str, Any] = {}
+        if auth_path.exists():
+            try:
+                loaded = json.loads(auth_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+
+        profiles_obj = existing.get("profiles")
+        profiles = profiles_obj if isinstance(profiles_obj, dict) else {}
+        current_profile = profiles.get(COBRA_ANTHROPIC_PROFILE_ID)
+        has_same_profile = isinstance(current_profile, dict) and all(
+            current_profile.get(k) == v for k, v in desired_profile.items()
+        )
+
+        order_obj = existing.get("order")
+        order = order_obj if isinstance(order_obj, dict) else {}
+        current_order_raw = order.get("anthropic")
+        current_order = (
+            [str(item).strip() for item in current_order_raw if str(item).strip()]
+            if isinstance(current_order_raw, list)
+            else []
+        )
+        desired_order = [COBRA_ANTHROPIC_PROFILE_ID] + [pid for pid in current_order if pid != COBRA_ANTHROPIC_PROFILE_ID]
+        has_same_order = current_order == desired_order
+
+        if has_same_profile and has_same_order and auth_path.exists():
+            continue
+
+        next_store: dict[str, Any] = existing if isinstance(existing, dict) else {}
+        next_store["version"] = int(next_store.get("version") or AUTH_STORE_VERSION)
+        if next_store["version"] <= 0:
+            next_store["version"] = AUTH_STORE_VERSION
+
+        next_profiles = next_store.get("profiles")
+        if not isinstance(next_profiles, dict):
+            next_profiles = {}
+            next_store["profiles"] = next_profiles
+        next_profiles[COBRA_ANTHROPIC_PROFILE_ID] = desired_profile
+
+        next_order = next_store.get("order")
+        if not isinstance(next_order, dict):
+            next_order = {}
+            next_store["order"] = next_order
+        next_order["anthropic"] = desired_order
+
+        _atomic_write_json(auth_path, next_store)
+        wrote_any = True
+
+    return wrote_any
+
+
 def send_to_openclaw(
     prompt: str,
     gateway_url: str,
     session_id: str | None = None,
+    anthropic_api_key: str | None = None,
     progress_callback: Optional[Any] = None,
 ) -> dict[str, Any]:
     """
@@ -167,7 +288,22 @@ def send_to_openclaw(
         return name == "browser" or name.startswith("web_")
 
     active_session_id = (session_id or OPENCLAW_SESSION_KEY or OPENCLAW_SESSION_ID).strip() or OPENCLAW_SESSION_ID
-    full_prompt = f"{SECURITY_CONTEXT}\n\n{prompt}"
+    enforcement_suffix = ""
+    if COBRA_REQUIRE_TERMINAL_ACTIONS:
+        enforcement_suffix = (
+            "\n\nExecution contract:\n"
+            "- Execute at least one terminal command for this request before finalizing.\n"
+            "- Never claim a command was run unless it appears in tool output."
+        )
+    full_prompt = f"{SECURITY_CONTEXT}\n\n{prompt}{enforcement_suffix}"
+
+    configured_key = (anthropic_api_key or "").strip()
+    if configured_key:
+        try:
+            _sync_anthropic_auth_profile(configured_key)
+        except Exception:
+            # Keep prompt execution resilient even if profile sync fails.
+            pass
 
     def _flatten_text(value: Any) -> list[str]:
         if value is None:
@@ -214,17 +350,29 @@ def send_to_openclaw(
         normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
         return normalized
 
-    def _extract_final_observation(payload_obj: dict[str, Any], *, fallback_text: str = "") -> str:
-        result = payload_obj.get("result")
+    def _collect_payload_texts(payload_obj: dict[str, Any]) -> list[str]:
         texts: list[str] = []
+
+        def _extend_from_payloads(payloads: Any) -> None:
+            if not isinstance(payloads, list):
+                return
+            for item in payloads:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+
+        # OpenClaw payload shape can be either {result:{payloads:[...]}} or {payloads:[...]}.
+        _extend_from_payloads(payload_obj.get("payloads"))
+        result = payload_obj.get("result")
         if isinstance(result, dict):
-            payloads = result.get("payloads")
-            if isinstance(payloads, list):
-                texts = [
-                    str(item.get("text") or "").strip()
-                    for item in payloads
-                    if isinstance(item, dict) and str(item.get("text") or "").strip()
-                ]
+            _extend_from_payloads(result.get("payloads"))
+
+        return texts
+
+    def _extract_final_observation(payload_obj: dict[str, Any], *, fallback_text: str = "") -> str:
+        texts = _collect_payload_texts(payload_obj)
         if texts:
             filtered = [text for text in texts if not DIAGNOSTIC_EXEC_LINE_RE.match(text)]
             candidates = filtered or texts
@@ -250,9 +398,78 @@ def send_to_openclaw(
             return _clean_final_observation(fallback)
 
         summary = str(payload_obj.get("summary") or "").strip()
+        if not summary:
+            result = payload_obj.get("result")
+            if isinstance(result, dict):
+                summary = str(result.get("summary") or "").strip()
         if summary:
             return _clean_final_observation(summary)
         return _clean_final_observation("Task completed.")
+
+    def _extract_exec_command(line: str) -> str:
+        command = re.sub(r"^\s*(?:[⚠️❌✅]?\s*)?(?:🛠️\s*)?Exec:\s*", "", str(line or ""), flags=re.IGNORECASE).strip()
+        return command or "(no command)"
+
+    def _emit_cli_actions_from_logs(log_text: str, parent_execution_id: str, *, start_index: int = 2) -> int:
+        if not progress_callback:
+            return 0
+
+        lines = [ANSI_ESCAPE_RE.sub("", str(line or "")).replace("\r", "").strip() for line in str(log_text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if not lines:
+            return 0
+
+        actions: list[dict[str, Any]] = []
+        current_action: dict[str, Any] | None = None
+
+        for line in lines:
+            if DIAGNOSTIC_EXEC_LINE_RE.match(line) or FALLBACK_EXEC_LINE_RE.match(line):
+                current_action = {
+                    "command": _extract_exec_command(line),
+                    "output_lines": [],
+                }
+                actions.append(current_action)
+                continue
+
+            if current_action is not None:
+                current_action["output_lines"].append(line)
+
+        if not actions:
+            return 0
+
+        for offset, action in enumerate(actions):
+            action_index = start_index + offset
+            action_execution_id = f"{parent_execution_id}-action-{action_index}"
+            output_lines = action.get("output_lines") if isinstance(action.get("output_lines"), list) else []
+            output = "\n".join(str(item) for item in output_lines if str(item).strip()).strip() or "(no output)"
+            if len(output) > 5000:
+                output = output[:5000].rstrip() + "\n...(truncated)"
+
+            progress_callback(
+                {
+                    "type": "tool_start",
+                    "data": {
+                        "tool_name": "terminal-exec",
+                        "command": str(action.get("command") or "(no command)"),
+                        "execution_id": action_execution_id,
+                        "action_index_1based": action_index,
+                    },
+                }
+            )
+            progress_callback(
+                {
+                    "type": "tool_execution",
+                    "data": {
+                        "tool_name": "terminal-exec",
+                        "command": str(action.get("command") or "(no command)"),
+                        "tool_output": output,
+                        "execution_id": action_execution_id,
+                        "action_index_1based": action_index,
+                    },
+                }
+            )
+
+        return len(actions)
 
     def _send_via_gateway_ws() -> dict[str, Any]:
         import websockets
@@ -273,6 +490,9 @@ def send_to_openclaw(
             latest_assistant_text = ""
             reasoning_buffer = ""
             last_reasoning_emit_at = 0.0
+            resolved_verbose_level = OPENCLAW_VERBOSE_LEVEL
+            if COBRA_REQUIRE_TERMINAL_ACTIONS and resolved_verbose_level.strip().lower() in {"off", "none", "0", "false"}:
+                resolved_verbose_level = "full"
 
             def flush_reasoning(*, force: bool = False) -> None:
                 nonlocal reasoning_buffer, last_reasoning_emit_at
@@ -494,7 +714,7 @@ def send_to_openclaw(
                             raise Exception(f"gateway connect failed: {error_message}")
                         patch_params: dict[str, Any] = {
                             "key": active_session_id,
-                            "verboseLevel": OPENCLAW_VERBOSE_LEVEL,
+                            "verboseLevel": resolved_verbose_level,
                         }
                         await ws.send(
                             json.dumps(
@@ -541,24 +761,19 @@ def send_to_openclaw(
                                 run_id = accepted_run_id
                             continue
                         flush_reasoning(force=True)
+                        if COBRA_REQUIRE_TERMINAL_ACTIONS and tool_counter <= 0:
+                            raise Exception(
+                                "No terminal actions were emitted by the gateway run. "
+                                "Cobra Lite requires visible command execution telemetry."
+                            )
                         final_observation = _extract_final_observation(payload, fallback_text=latest_assistant_text)
                         return {"final_observation": final_observation}
 
         return asyncio.run(_run())
 
     def _send_via_cli() -> dict[str, Any]:
-        if progress_callback:
-            progress_callback(
-                {
-                    "type": "tool_start",
-                    "data": {
-                        "tool_name": "gateway-agent",
-                        "command": "openclaw agent",
-                        "execution_id": "gateway-agent",
-                    },
-                }
-            )
-
+        execution_id = "gateway-agent-cli"
+        verbose_switch = "off" if OPENCLAW_VERBOSE_LEVEL.strip().lower() in {"off", "none", "0", "false"} else "on"
         command = [
             "openclaw",
             "agent",
@@ -567,46 +782,354 @@ def send_to_openclaw(
             "--message",
             full_prompt,
             "--json",
+            "--verbose",
+            verbose_switch,
             "--timeout",
             str(OPENCLAW_AGENT_TIMEOUT_SECONDS),
         ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=OPENCLAW_AGENT_TIMEOUT_SECONDS + 15,
+        if shutil.which("stdbuf"):
+            command = ["stdbuf", "-oL", "-eL", *command]
+        command_text = (
+            "openclaw agent "
+            f"--session-id {active_session_id} "
+            "--message <omitted> "
+            "--json "
+            f"--verbose {verbose_switch} "
+            f"--timeout {OPENCLAW_AGENT_TIMEOUT_SECONDS}"
         )
 
-        if completed.returncode != 0:
-            error_text = (completed.stderr or completed.stdout or "").strip()
-            raise Exception(f"Gateway CLI error: {error_text or f'exit code {completed.returncode}'}")
+        if progress_callback:
+            progress_callback(
+                {
+                    "type": "tool_start",
+                    "data": {
+                        "tool_name": "gateway-agent",
+                        "command": command_text,
+                        "execution_id": execution_id,
+                        "action_index_1based": 1,
+                    },
+                }
+            )
 
-        raw = (completed.stdout or "").strip()
+        env = os.environ.copy()
+        configured_key = (anthropic_api_key or "").strip()
+        if configured_key:
+            env["ANTHROPIC_API_KEY"] = configured_key
+            env["CLAUDE_API_KEY"] = configured_key
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        line_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        active_streams = 0
+        closed_streams = 0
+        live_action_count = 0
+        current_action_id: str | None = None
+        current_action_step: int | None = None
+        current_action_command = ""
+        current_action_output_lines: list[str] = []
+
+        def _emit_running_action_update(line: str) -> None:
+            if not progress_callback or not current_action_id or current_action_step is None:
+                return
+            progress_callback(
+                {
+                    "type": "tool_update",
+                    "data": {
+                        "tool_name": "terminal-exec",
+                        "command": current_action_command or "(no command)",
+                        "tool_output": line,
+                        "execution_id": current_action_id,
+                        "action_index_1based": current_action_step,
+                    },
+                }
+            )
+
+        def _finish_current_action() -> None:
+            nonlocal current_action_id, current_action_step, current_action_command, current_action_output_lines
+            if not progress_callback or not current_action_id or current_action_step is None:
+                current_action_id = None
+                current_action_step = None
+                current_action_command = ""
+                current_action_output_lines = []
+                return
+            output = "\n".join(current_action_output_lines).strip() or "(no output)"
+            if len(output) > 5000:
+                output = output[:5000].rstrip() + "\n...(truncated)"
+            progress_callback(
+                {
+                    "type": "tool_execution",
+                    "data": {
+                        "tool_name": "terminal-exec",
+                        "command": current_action_command or "(no command)",
+                        "tool_output": output,
+                        "execution_id": current_action_id,
+                        "action_index_1based": current_action_step,
+                    },
+                }
+            )
+            current_action_id = None
+            current_action_step = None
+            current_action_command = ""
+            current_action_output_lines = []
+
+        def _stream_reader(stream: Any, source: str) -> None:
+            try:
+                for raw_line in iter(stream.readline, ""):
+                    line_queue.put((source, raw_line))
+            finally:
+                line_queue.put((source, None))
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for source, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            if stream is None:
+                continue
+            active_streams += 1
+            threading.Thread(target=_stream_reader, args=(stream, source), daemon=True).start()
+
+        try:
+            while closed_streams < active_streams:
+                try:
+                    source, raw_line = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if process.poll() is not None and closed_streams >= active_streams:
+                        break
+                    continue
+
+                if raw_line is None:
+                    closed_streams += 1
+                    continue
+
+                if source == "stdout":
+                    stdout_chunks.append(raw_line)
+                    continue
+
+                stderr_chunks.append(raw_line)
+                clean_line = ANSI_ESCAPE_RE.sub("", str(raw_line or "")).replace("\r", "").strip()
+                if not clean_line:
+                    continue
+
+                if DIAGNOSTIC_EXEC_LINE_RE.match(clean_line) or FALLBACK_EXEC_LINE_RE.match(clean_line):
+                    _finish_current_action()
+                    live_action_count += 1
+                    step_index = live_action_count + 1
+                    current_action_id = f"{execution_id}-action-{step_index}"
+                    current_action_step = step_index
+                    current_action_command = _extract_exec_command(clean_line)
+                    current_action_output_lines = []
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "type": "tool_start",
+                                "data": {
+                                    "tool_name": "terminal-exec",
+                                    "command": current_action_command,
+                                    "execution_id": current_action_id,
+                                    "action_index_1based": step_index,
+                                },
+                            }
+                        )
+                    continue
+
+                if current_action_id is not None:
+                    current_action_output_lines.append(clean_line)
+                    _emit_running_action_update(clean_line)
+
+            return_code = process.wait(timeout=OPENCLAW_AGENT_TIMEOUT_SECONDS + 15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return_code = process.wait(timeout=5)
+        finally:
+            _finish_current_action()
+
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "".join(stderr_chunks)
+
+        if return_code != 0:
+            error_text = (stderr_text or stdout_text or "").strip()
+            if progress_callback and error_text:
+                progress_callback(
+                    {
+                        "type": "tool_execution",
+                        "data": {
+                            "tool_name": "gateway-agent",
+                            "command": command_text,
+                            "tool_output": error_text,
+                            "execution_id": execution_id,
+                            "is_error": True,
+                            "action_index_1based": 1,
+                        },
+                    }
+                )
+            raise Exception(f"Gateway CLI error: {error_text or f'exit code {return_code}'}")
+
+        raw_stdout = stdout_text
+        raw = raw_stdout.strip()
         if not raw:
             raise Exception("Gateway CLI returned an empty response.")
 
-        parsed: dict[str, Any] | None = None
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            if start >= 0:
-                parsed = json.loads(raw[start:])
-            else:
-                raise
+        def _decode_cli_json(raw_text: str) -> tuple[dict[str, Any], str, str]:
+            text = str(raw_text or "").strip()
+            if not text:
+                raise Exception("Gateway CLI returned an empty response.")
+            try:
+                decoded = json.loads(text)
+                if isinstance(decoded, dict):
+                    return decoded, "", ""
+            except json.JSONDecodeError:
+                pass
+
+            decoder = json.JSONDecoder()
+            for match in re.finditer(r"\{", text):
+                start = match.start()
+                try:
+                    candidate, consumed = decoder.raw_decode(text[start:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict):
+                    return candidate, text[:start].strip(), text[start + consumed :].strip()
+            raise Exception("Gateway CLI returned non-JSON output.")
+
+        parsed, stdout_prefix, stdout_suffix = _decode_cli_json(raw)
 
         if not isinstance(parsed, dict):
             raise Exception("Gateway CLI returned non-JSON output.")
 
+        def _resolve_cli_status(payload_obj: dict[str, Any]) -> str:
+            direct_keys = ("status", "state", "phase")
+            for key in direct_keys:
+                value = str(payload_obj.get(key) or "").strip()
+                if value:
+                    return value
+            result_obj = payload_obj.get("result")
+            if isinstance(result_obj, dict):
+                for key in direct_keys:
+                    value = str(result_obj.get(key) or "").strip()
+                    if value:
+                        return value
+            meta_obj = payload_obj.get("meta")
+            if isinstance(meta_obj, dict):
+                aborted = meta_obj.get("aborted")
+                if aborted is False:
+                    return "completed"
+                if aborted is True:
+                    return "aborted"
+            if _collect_payload_texts(payload_obj):
+                return "completed"
+            return "success" if bool(payload_obj) else "unknown"
+
+        def _build_cli_terminal_output(payload_obj: dict[str, Any], stderr_text: str) -> str:
+            lines: list[str] = []
+            run_id = str(payload_obj.get("runId") or payload_obj.get("id") or "").strip()
+            if run_id:
+                lines.append(f"Run id: {run_id}")
+
+            status_value = _resolve_cli_status(payload_obj)
+            lines.append(f"Run status: {status_value}")
+
+            meta_obj = payload_obj.get("meta")
+            if isinstance(meta_obj, dict):
+                duration_ms = meta_obj.get("durationMs")
+                if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+                    lines.append(f"Duration: {int(duration_ms)} ms")
+                agent_meta = meta_obj.get("agentMeta")
+                if isinstance(agent_meta, dict):
+                    provider = str(agent_meta.get("provider") or "").strip()
+                    model = str(agent_meta.get("model") or "").strip()
+                    if provider or model:
+                        lines.append(f"Model: {(provider + ' / ' + model).strip(' /')}")
+                    usage = agent_meta.get("usage")
+                    if isinstance(usage, dict):
+                        total = usage.get("total")
+                        if isinstance(total, (int, float)):
+                            lines.append(f"Tokens: {int(total)}")
+
+            payload_texts = _collect_payload_texts(payload_obj)
+            if payload_texts:
+                lines.append("")
+                lines.append("Result preview:")
+                lines.append("\n\n".join(payload_texts[:2]))
+
+            # Suppress noisy failover diagnostics when the CLI call ultimately succeeds.
+            stderr_clean = str(stderr_text or "").strip()
+            if stderr_clean and "falling back to embedded" not in stderr_clean.lower():
+                lines.append("")
+                lines.append("Gateway diagnostics:")
+                lines.append(stderr_clean[:1200])
+
+            output = "\n".join(lines).strip()
+            max_len = 8000
+            if len(output) > max_len:
+                output = output[:max_len].rstrip() + "\n...(truncated)"
+            return output
+
+        run_status = _resolve_cli_status(parsed)
+        cli_terminal_output = _build_cli_terminal_output(parsed, stderr_text)
+        cli_action_count = live_action_count
+        if cli_action_count <= 0:
+            cli_action_logs = "\n".join(
+                segment
+                for segment in (
+                    stdout_prefix,
+                    stdout_suffix,
+                    stderr_text,
+                )
+                if str(segment).strip()
+            )
+            cli_action_count = _emit_cli_actions_from_logs(cli_action_logs, execution_id, start_index=2)
+
+        if COBRA_REQUIRE_TERMINAL_ACTIONS and cli_action_count <= 0 and not COBRA_ALLOW_NONSTREAM_FALLBACK:
+            raise Exception(
+                "No terminal command actions were emitted by the fallback agent run. "
+                "Cobra Lite requires live, per-command execution telemetry."
+            )
+
         if progress_callback:
+            progress_callback(
+                {
+                    "type": "tool_update",
+                    "data": {
+                        "tool_name": "gateway-agent",
+                        "command": command_text,
+                        "tool_output": cli_terminal_output,
+                        "execution_id": execution_id,
+                        "action_index_1based": 1,
+                    },
+                }
+            )
+            if cli_action_count <= 0:
+                progress_callback(
+                    {
+                        "type": "tool_update",
+                        "data": {
+                            "tool_name": "gateway-agent",
+                            "command": command_text,
+                            "tool_output": "No explicit terminal actions were emitted by the gateway for this run.",
+                            "execution_id": execution_id,
+                            "action_index_1based": 1,
+                        },
+                    }
+                )
             progress_callback(
                 {
                     "type": "tool_execution",
                     "data": {
                         "tool_name": "gateway-agent",
-                        "tool_output": f"Run status: {parsed.get('status', 'unknown')}",
-                        "execution_id": str(parsed.get("runId", "gateway-agent")),
+                        "command": command_text,
+                        "tool_output": f"Run status: {run_status}",
+                        "execution_id": execution_id,
+                        "action_index_1based": 1,
                     },
                 }
             )
@@ -687,13 +1210,36 @@ def send_to_openclaw(
             }
 
     errors: list[str] = []
+    ws_failure_message = ""
 
     try:
         return _send_via_gateway_ws()
     except Exception as ws_error:
         if isinstance(ws_error, _PolicyViolationError):
             raise
-        errors.append(f"ws: {str(ws_error)}")
+        ws_failure_message = str(ws_error)
+        errors.append(f"ws: {ws_failure_message}")
+
+        missing_provider = extract_missing_provider(ws_failure_message)
+        if missing_provider == "anthropic" and configured_key:
+            try:
+                _sync_anthropic_auth_profile(configured_key)
+            except Exception:
+                pass
+            try:
+                return _send_via_gateway_ws()
+            except Exception as ws_retry_error:
+                if isinstance(ws_retry_error, _PolicyViolationError):
+                    raise
+                ws_failure_message = str(ws_retry_error)
+                errors.append(f"ws-retry: {ws_failure_message}")
+
+    if COBRA_REQUIRE_LIVE_TELEMETRY and not COBRA_ALLOW_NONSTREAM_FALLBACK:
+        reason = ws_failure_message or "unknown websocket transport failure"
+        raise Exception(
+            "Live gateway telemetry is required, but WebSocket transport is unavailable. "
+            f"{reason}. Configure gateway auth/connectivity and retry."
+        )
 
     try:
         return _send_via_http()

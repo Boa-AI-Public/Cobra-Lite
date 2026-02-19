@@ -13,10 +13,26 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 REQUEST_TIMEOUT_SECONDS = 12
 CHAT_HISTORY_MAX_MESSAGES = int(os.getenv("CHAT_HISTORY_MAX_MESSAGES", "2000"))
 CHAT_HISTORY_MAX_CHARS = int(os.getenv("CHAT_HISTORY_MAX_CHARS", "240000"))
 COBRA_EXECUTION_MODE = (os.getenv("COBRA_EXECUTION_MODE", "cli_only").strip().lower() or "cli_only")
+COBRA_REQUIRE_LIVE_TELEMETRY = env_flag("COBRA_REQUIRE_LIVE_TELEMETRY", True)
+COBRA_ALLOW_NONSTREAM_FALLBACK = env_flag("COBRA_ALLOW_NONSTREAM_FALLBACK", False)
+COBRA_REQUIRE_TERMINAL_ACTIONS = env_flag("COBRA_REQUIRE_TERMINAL_ACTIONS", True)
 
 STATE_FILE = Path(os.getenv("STATE_FILE", BASE_DIR / ".claw_state.json"))
 SESSIONS_FILE = Path(os.getenv("SESSIONS_FILE", BASE_DIR / ".claw_sessions.json"))
@@ -37,6 +53,7 @@ OPENCLAW_VERBOSE_LEVEL = os.getenv("OPENCLAW_VERBOSE_LEVEL", "full").strip() or 
 OPENCLAW_PROTOCOL_VERSION = 3
 GATEWAY_SCOPES = ["operator.admin", "operator.approvals", "operator.pairing"]
 OPENCLAW_STATE_DIR = Path(os.getenv("OPENCLAW_STATE_DIR", str(Path.home() / ".openclaw")))
+OPENCLAW_MAIN_AGENT_DIR = Path(os.getenv("OPENCLAW_MAIN_AGENT_DIR", str(OPENCLAW_STATE_DIR / "agents" / "main" / "agent")))
 OPENCLAW_IDENTITY_PATH = Path(
     os.getenv("OPENCLAW_DEVICE_IDENTITY_PATH", str(OPENCLAW_STATE_DIR / "identity" / "device.json"))
 )
@@ -49,6 +66,8 @@ DIAGNOSTIC_EXEC_LINE_RE = re.compile(r"^\s*[⚠️❌✅]?\s*🛠️\s*Exec:", r
 CLI_ONLY_EXTRA_SYSTEM_PROMPT = """Runtime policy for this interface:
 - Use terminal/local tools only.
 - Allowed style: exec/bash/process and local workspace/file operations as needed.
+- You MUST execute at least one terminal command per request before finalizing.
+- Never claim command execution unless it appears in tool output.
 - Do NOT use browser.
 - Do NOT use web_search or web_fetch (or any web_* tool).
 - Do NOT rely on external API keys beyond the configured model provider.

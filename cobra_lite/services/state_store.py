@@ -39,3 +39,33 @@ class JsonStateStore:
         if not isinstance(stored, str):
             return None
         return stored.strip() or None
+
+    def set_provider_key(self, provider: str, api_key: str) -> None:
+        provider_name = (provider or "").strip().lower()
+        if not provider_name:
+            raise ValueError("Provider is required.")
+        key = (api_key or "").strip()
+        if not key:
+            raise ValueError("API key is required.")
+        with self._lock:
+            state = self._load()
+            provider_keys = state.get("provider_keys")
+            if not isinstance(provider_keys, dict):
+                provider_keys = {}
+            provider_keys[provider_name] = key
+            state["provider_keys"] = provider_keys
+            self._save(state)
+
+    def get_provider_key(self, provider: str) -> str | None:
+        provider_name = (provider or "").strip().lower()
+        if not provider_name:
+            return None
+        with self._lock:
+            state = self._load()
+        provider_keys = state.get("provider_keys")
+        if not isinstance(provider_keys, dict):
+            return None
+        stored = provider_keys.get(provider_name)
+        if not isinstance(stored, str):
+            return None
+        return stored.strip() or None

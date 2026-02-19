@@ -8,7 +8,12 @@ from typing import Any
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 from cobra_lite.config import BASE_DIR, OPENCLAW_GATEWAY_URL, SESSIONS_FILE, STATE_FILE
-from cobra_lite.services.gateway_client import effective_gateway_url, send_to_openclaw, verify_openclaw_connection
+from cobra_lite.services.gateway_client import (
+    effective_gateway_url,
+    extract_missing_provider,
+    send_to_openclaw,
+    verify_openclaw_connection,
+)
 from cobra_lite.services.session_store import SessionStore
 from cobra_lite.services.state_store import JsonStateStore
 
@@ -53,6 +58,25 @@ def create_app() -> Flask:
     state_store = JsonStateStore(STATE_FILE)
     session_store = SessionStore(SESSIONS_FILE)
 
+    def _resolve_anthropic_key() -> str | None:
+        env_key = str(os.getenv("ANTHROPIC_API_KEY") or "").strip()
+        if env_key:
+            return env_key
+        return state_store.get_provider_key("anthropic")
+
+    def _missing_provider_payload(provider: str = "anthropic") -> dict[str, Any]:
+        normalized_provider = (provider or "anthropic").strip().lower() or "anthropic"
+        if normalized_provider == "anthropic":
+            message = "Anthropic API key is required. Add your key in settings to continue."
+        else:
+            message = f'{normalized_provider.title()} API key is required. Add your key in settings to continue.'
+        return {
+            "ok": False,
+            "code": "missing_provider_key",
+            "provider": normalized_provider,
+            "message": message,
+        }
+
     def _resolve_session_id(payload: dict[str, Any]) -> str:
         requested = str(payload.get("session_id") or "").strip()
         if requested and session_store.get_session(requested):
@@ -73,6 +97,7 @@ def create_app() -> Flask:
         return render_template(
             "index.html",
             has_gateway=bool(saved_gateway),
+            has_anthropic_key=bool(_resolve_anthropic_key()),
             default_gateway_url=OPENCLAW_GATEWAY_URL,
             saved_gateway_url=gateway,
         )
@@ -125,6 +150,28 @@ def create_app() -> Flask:
         state_store.set_gateway_url(gateway_url)
         return jsonify({"ok": True, "message": message})
 
+    @app.get("/api/auth-status")
+    def auth_status():
+        return jsonify(
+            {
+                "ok": True,
+                "providers": {
+                    "anthropic": {
+                        "configured": bool(_resolve_anthropic_key()),
+                    }
+                },
+            }
+        )
+
+    @app.post("/api/auth/anthropic")
+    def save_anthropic_key():
+        payload = request.get_json(silent=True) or {}
+        api_key = str(payload.get("api_key") or "").strip()
+        if not api_key:
+            return jsonify({"ok": False, "message": "API key cannot be empty."}), 400
+        state_store.set_provider_key("anthropic", api_key)
+        return jsonify({"ok": True, "message": "Anthropic key saved."})
+
     @app.post("/api/prompt")
     def submit_prompt():
         payload = request.get_json(silent=True) or {}
@@ -135,12 +182,18 @@ def create_app() -> Flask:
         session_id = _resolve_session_id(payload)
         session_store.append_message(session_id, "user", prompt)
         gateway_url = effective_gateway_url(state_store.get_gateway_url())
+        anthropic_api_key = _resolve_anthropic_key()
+        if not anthropic_api_key:
+            missing_payload = _missing_provider_payload("anthropic")
+            session_store.append_message(session_id, "assistant", f"Error: {missing_payload['message']}")
+            return jsonify({**missing_payload, "session_id": session_id}), 400
 
         try:
             result = send_to_openclaw(
                 prompt=prompt,
                 gateway_url=gateway_url,
                 session_id=session_id,
+                anthropic_api_key=anthropic_api_key,
             )
             final_text = str(result.get("final_observation") or "Task completed.").strip()
             session_store.append_message(session_id, "assistant", final_text)
@@ -154,6 +207,11 @@ def create_app() -> Flask:
             )
         except Exception as e:
             error_message = str(e)
+            missing_provider = extract_missing_provider(error_message)
+            if missing_provider:
+                missing_payload = _missing_provider_payload(missing_provider)
+                session_store.append_message(session_id, "assistant", f"Error: {missing_payload['message']}")
+                return jsonify({**missing_payload, "session_id": session_id}), 400
             session_store.append_message(session_id, "assistant", f"Error: {error_message}")
             return jsonify({"ok": False, "session_id": session_id, "message": error_message}), 500
 
@@ -167,6 +225,11 @@ def create_app() -> Flask:
         session_id = _resolve_session_id(payload)
         session_store.append_message(session_id, "user", prompt)
         gateway_url = effective_gateway_url(state_store.get_gateway_url())
+        anthropic_api_key = _resolve_anthropic_key()
+        if not anthropic_api_key:
+            missing_payload = _missing_provider_payload("anthropic")
+            session_store.append_message(session_id, "assistant", f"Error: {missing_payload['message']}")
+            return jsonify({**missing_payload, "session_id": session_id}), 400
 
         events: queue.Queue = queue.Queue()
 
@@ -179,14 +242,31 @@ def create_app() -> Flask:
                     prompt=prompt,
                     gateway_url=gateway_url,
                     session_id=session_id,
+                    anthropic_api_key=anthropic_api_key,
                     progress_callback=emit,
                 )
                 final_text = str(result.get("final_observation") or "Task completed.").strip()
                 session_store.append_message(session_id, "assistant", final_text)
             except Exception as exc:
                 message = str(exc)
-                session_store.append_message(session_id, "assistant", f"Error: {message}")
-                emit({"type": "error", "data": {"message": message, "session_id": session_id}})
+                missing_provider = extract_missing_provider(message)
+                if missing_provider:
+                    missing_payload = _missing_provider_payload(missing_provider)
+                    session_store.append_message(session_id, "assistant", f"Error: {missing_payload['message']}")
+                    emit(
+                        {
+                            "type": "error",
+                            "data": {
+                                "message": missing_payload["message"],
+                                "code": missing_payload["code"],
+                                "provider": missing_provider,
+                                "session_id": session_id,
+                            },
+                        }
+                    )
+                else:
+                    session_store.append_message(session_id, "assistant", f"Error: {message}")
+                    emit({"type": "error", "data": {"message": message, "session_id": session_id}})
                 emit({"type": "done", "data": {"ok": False, "session_id": session_id}})
                 events.put(None)
                 return

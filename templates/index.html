@@ -36,20 +36,8 @@
     </header>
 
     <main class="shell">
-      <section class="hero">
-        <p class="chip">COBRA LITE WORKBENCH</p>
-        <h1>
-          Launch <span>Cobra Lite</span>
-          <br />
-          your security testing agent
-        </h1>
-        <p class="hero-sub">
-          Connect your local gateway once, then run guided security testing tasks with live execution telemetry.
-        </p>
-      </section>
-
       <div class="workspace">
-        <aside id="session-pane" class="panel session-pane {% if not has_gateway %}hidden{% endif %}">
+        <aside id="session-pane" class="session-pane {% if not has_gateway %}hidden{% endif %}">
           <div class="session-pane-head">
             <h2>Sessions</h2>
             <button id="new-session-btn" class="ghost-btn new-session-btn" type="button">+ New Session</button>
@@ -58,7 +46,7 @@
           <p id="session-status" class="status-text" aria-live="polite"></p>
         </aside>
 
-        <div class="workspace-main">
+        <div class="chat-column">
           <section id="key-gate" class="panel token-panel {% if has_gateway %}hidden{% endif %}">
             <h2>Connect to Gateway</h2>
             <p class="panel-sub">
@@ -90,30 +78,71 @@
 
           <section id="main-app" class="panel prompt-panel {% if not has_gateway %}hidden{% endif %}">
             <div class="prompt-header">
-              <h2>Chat with Cobra Lite</h2>
-              <p>Enter to send. Use Shift+Enter for a new line.</p>
+              <h2>Chat</h2>
+              <p>User messages and final AI answers appear here.</p>
             </div>
             <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
           </section>
-        </div>
-      </div>
 
-      <section id="composer-dock" class="composer-dock {% if not has_gateway %}hidden{% endif %}">
-        <form id="prompt-form" class="prompt-form">
-          <label for="prompt-input" class="sr-only">Prompt</label>
-          <div class="prompt-composer">
-            <textarea
-              id="prompt-input"
-              name="prompt"
-              rows="1"
-              placeholder="Describe your security testing task..."
-              required
-            ></textarea>
-            <button class="cta-btn prompt-submit" type="submit">Send</button>
+          <section id="composer-dock" class="composer-dock {% if not has_gateway %}hidden{% endif %}">
+            <form id="prompt-form" class="prompt-form">
+              <label for="prompt-input" class="sr-only">Prompt</label>
+              <div class="prompt-composer">
+                <textarea
+                  id="prompt-input"
+                  name="prompt"
+                  rows="1"
+                  placeholder="Describe your security testing task..."
+                  required
+                ></textarea>
+                <button class="cta-btn prompt-submit" type="submit">Send</button>
+              </div>
+            </form>
+            <p id="prompt-status" class="status-text" aria-live="polite"></p>
+          </section>
+        </div>
+
+        <aside id="execution-pane" class="panel execution-pane {% if not has_gateway %}hidden{% endif %}">
+          <div class="execution-header">
+            <h2>Execution</h2>
+            <div class="execution-tabs" role="tablist" aria-label="Execution view">
+              <button
+                id="execution-tab-terminal"
+                class="execution-tab active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="execution-terminal-view"
+              >
+                Terminal
+              </button>
+              <button
+                id="execution-tab-graph"
+                class="execution-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="execution-graph-view"
+              >
+                Graph
+              </button>
+            </div>
           </div>
-        </form>
-        <p id="prompt-status" class="status-text" aria-live="polite"></p>
-      </section>
+          <section id="execution-terminal-view" class="execution-view" role="tabpanel" aria-labelledby="execution-tab-terminal">
+            <div id="execution-feed" class="execution-feed" aria-live="polite">
+              <div class="execution-empty">Run a prompt to stream terminal output.</div>
+            </div>
+          </section>
+          <section
+            id="execution-graph-view"
+            class="execution-view hidden"
+            role="tabpanel"
+            aria-labelledby="execution-tab-graph"
+          >
+            <div class="graph-placeholder">Graph view is empty for now.</div>
+          </section>
+        </aside>
+      </div>
 
       <p class="tool-attribution">Cobra Lite</p>
     </main>
@@ -139,8 +168,39 @@
       </div>
     </div>
 
+    <div
+      id="auth-modal"
+      class="modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-title"
+      aria-describedby="auth-description"
+    >
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="auth-title">Add Anthropic API Key</h3>
+        </div>
+        <p id="auth-description" class="panel-sub">
+          Cobra Lite needs an Anthropic API key to run prompts with your local OpenClaw agent.
+        </p>
+        <form id="auth-form" class="stack-form" autocomplete="off">
+          <label for="auth-key-input" class="sr-only">Anthropic API key</label>
+          <input
+            id="auth-key-input"
+            name="anthropic_api_key"
+            type="password"
+            placeholder="sk-ant-..."
+            required
+          />
+          <button class="cta-btn" type="submit">Save Key</button>
+        </form>
+        <p id="auth-status" class="status-text" aria-live="polite"></p>
+      </div>
+    </div>
+
     <script>
       window.CLAW_HAS_GATEWAY = {{ "true" if has_gateway else "false" }};
+      window.CLAW_HAS_ANTHROPIC_KEY = {{ "true" if has_anthropic_key else "false" }};
       window.CLAW_DEFAULT_GATEWAY_URL = {{ default_gateway_url | tojson }};
     </script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>

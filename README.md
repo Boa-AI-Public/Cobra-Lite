@@ -73,6 +73,7 @@ HOST=127.0.0.1
    - The app verifies connectivity and saves your settings
 
 2. **Start Testing**
+   - On first run, Cobra Lite will prompt for your Anthropic API key (`sk-ant-...`)
    - Enter security testing prompts in natural language
    - Examples:
      ```
@@ -148,6 +149,11 @@ sudo apt update
 sudo apt install nmap curl nikto
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
+
+### Anthropic Key Missing
+
+If the UI says an Anthropic key is required, open the key modal and save your `sk-ant-...` key.  
+Cobra Lite stores this key in local app state (`.claw_state.json`) and uses it for `openclaw agent` runs.
 
 
 ### Extending

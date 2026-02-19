@@ -67,6 +67,9 @@ openclaw gateway start
 ### "Port already in use"
 App auto-selects next available port. Check startup message.
 
+### "Anthropic API key is required"
+Use the in-app prompt to save your `sk-ant-...` key, then resend the prompt.
+
 ### No security tools available
 Install tools on the same system running the gateway:
 ```bash
