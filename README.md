@@ -3,7 +3,8 @@
 # Cobra Lite - An OpenClaw Hacking Copilot
 
 ![Cobra Lite demo screenshot](static/images/Demo_screenshot.png)
-![Discord Banner 2](https://discord.com/api/guilds/1472687384033493077/widget.png?style=banner2)
+![Discord Shield](https://discord.com/api/guilds/1472687384033493077/widget.png?style=shield)
+
 A web-based security testing interface powered by **OpenClaw** - your AI-driven penetration testing assistant.
 
 ## What It Does
