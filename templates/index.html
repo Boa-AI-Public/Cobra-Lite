@@ -39,7 +39,19 @@
       <div class="workspace">
         <aside id="session-pane" class="session-pane {% if not has_gateway %}hidden{% endif %}">
           <div class="session-pane-head">
-            <h2>Sessions</h2>
+            <div class="session-pane-head-row">
+              <h2>Sessions</h2>
+              <button
+                id="session-fold-btn"
+                class="session-fold-btn"
+                type="button"
+                aria-expanded="true"
+                aria-controls="session-list"
+                title="Collapse sessions"
+              >
+                «
+              </button>
+            </div>
             <button id="new-session-btn" class="ghost-btn new-session-btn" type="button">+ New Session</button>
           </div>
           <div id="session-list" class="session-list" aria-live="polite"></div>
@@ -101,6 +113,14 @@
             <p id="prompt-status" class="status-text" aria-live="polite"></p>
           </section>
         </div>
+        <div
+          id="chat-execution-resizer"
+          class="pane-resizer pane-resizer-horizontal {% if not has_gateway %}hidden{% endif %}"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat and execution panes"
+          tabindex="0"
+        ></div>
 
         <aside id="execution-pane" class="panel execution-pane {% if not has_gateway %}hidden{% endif %}">
           <div class="execution-header">
@@ -126,6 +146,16 @@
               >
                 Graph
               </button>
+              <button
+                id="execution-tab-files"
+                class="execution-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="execution-files-view"
+              >
+                Files
+              </button>
             </div>
           </div>
           <section id="execution-terminal-view" class="execution-view" role="tabpanel" aria-labelledby="execution-tab-terminal">
@@ -140,6 +170,40 @@
             aria-labelledby="execution-tab-graph"
           >
             <div class="graph-placeholder">Graph view is empty for now.</div>
+          </section>
+          <section
+            id="execution-files-view"
+            class="execution-view hidden"
+            role="tabpanel"
+            aria-labelledby="execution-tab-files"
+          >
+            <div class="files-view">
+              <div class="files-selector">
+                <div class="files-toolbar">
+                  <button id="files-up-btn" class="ghost-btn files-action-btn" type="button">Up</button>
+                  <button id="files-refresh-btn" class="ghost-btn files-action-btn" type="button">Refresh</button>
+                </div>
+                <div id="files-breadcrumb" class="files-breadcrumb">Workspace</div>
+                <div id="files-list" class="files-list" aria-live="polite"></div>
+              </div>
+              <div
+                id="files-resizer"
+                class="pane-resizer pane-resizer-vertical"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize file explorer and preview"
+                tabindex="0"
+              ></div>
+              <div class="files-reader">
+                <div id="files-preview-meta" class="files-preview-meta">Select a file to preview.</div>
+                <textarea
+                  id="files-preview-content"
+                  class="files-preview-content"
+                  readonly
+                  spellcheck="false"
+                ></textarea>
+              </div>
+            </div>
           </section>
         </aside>
       </div>

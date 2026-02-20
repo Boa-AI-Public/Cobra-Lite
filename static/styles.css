@@ -13,6 +13,11 @@
   --ok: #7ce9a6;
   --bad: #ff6672;
   --warn: #f4cf5a;
+  --execution-width: 460px;
+  --pane-resizer-size: 0.52rem;
+  --files-selector-height: 28%;
+  --session-width: 278px;
+  --session-width-collapsed: 66px;
 }
 
 *,
@@ -153,8 +158,12 @@ body {
   height: calc(100% - 1.35rem);
   min-height: 0;
   display: grid;
-  grid-template-columns: 278px minmax(540px, 1fr) minmax(380px, 460px);
-  gap: 0.75rem;
+  grid-template-columns:
+    var(--session-width)
+    minmax(500px, 1fr)
+    var(--pane-resizer-size)
+    minmax(320px, var(--execution-width));
+  gap: 0.55rem;
 }
 
 .panel,
@@ -166,16 +175,26 @@ body {
 
 .session-pane {
   height: 100%;
+  min-height: 0;
   padding: 0.75rem;
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
   margin-left: 0;
+  overflow: hidden;
 }
 
 .session-pane-head {
   display: grid;
   gap: 0.55rem;
+  flex: 0 0 auto;
+}
+
+.session-pane-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
 
 .session-pane-head h2 {
@@ -193,9 +212,27 @@ body {
   color: var(--accent);
 }
 
+.session-fold-btn {
+  width: 1.95rem;
+  height: 1.95rem;
+  border: 1px solid var(--line-strong);
+  background: #07120d;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.session-fold-btn:hover,
+.session-fold-btn:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .session-list {
-  min-height: 8rem;
-  flex: 1;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
   display: grid;
   gap: 0.36rem;
@@ -282,6 +319,34 @@ body {
   padding: 0.75rem;
   font-size: 0.84rem;
   font-family: "IBM Plex Mono", monospace;
+}
+
+body.sessions-collapsed {
+  --session-width: var(--session-width-collapsed);
+}
+
+body.sessions-collapsed .session-pane {
+  padding: 0.55rem 0.45rem;
+}
+
+body.sessions-collapsed .session-pane-head h2,
+body.sessions-collapsed .new-session-btn,
+body.sessions-collapsed .session-list,
+body.sessions-collapsed #session-status {
+  display: none;
+}
+
+body.sessions-collapsed .session-pane-head {
+  gap: 0;
+}
+
+body.sessions-collapsed .session-pane-head-row {
+  justify-content: center;
+}
+
+body.sessions-collapsed .session-fold-btn {
+  width: 2.1rem;
+  height: 2.1rem;
 }
 
 .chat-column {
@@ -457,6 +522,50 @@ body {
   min-height: 0;
 }
 
+.pane-resizer {
+  position: relative;
+  border: 1px solid var(--line-strong);
+  background: rgba(6, 18, 12, 0.85);
+}
+
+.pane-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0.22rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(122, 213, 71, 0.18), rgba(43, 200, 150, 0.1));
+}
+
+.pane-resizer:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(122, 213, 71, 0.3);
+}
+
+.pane-resizer-horizontal {
+  min-height: 0;
+  width: 100%;
+  cursor: col-resize;
+}
+
+.pane-resizer-vertical {
+  height: var(--pane-resizer-size);
+  width: 100%;
+  cursor: row-resize;
+}
+
+body.dragging-col,
+body.dragging-col * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.dragging-row,
+body.dragging-row * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
 .execution-header {
   display: flex;
   justify-content: space-between;
@@ -554,6 +663,172 @@ body {
 }
 
 .graph-placeholder {
+  height: 100%;
+  border: 1px dashed var(--line-strong);
+  background: rgba(7, 18, 12, 0.58);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  font-family: "IBM Plex Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 0.82rem;
+}
+
+.files-view {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(10.25rem, var(--files-selector-height)) var(--pane-resizer-size) minmax(0, 1fr);
+  gap: 0.45rem;
+}
+
+.files-selector {
+  min-height: 0;
+  border: 1px solid var(--line);
+  background: #06110b;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0.26rem;
+  padding: 0.28rem;
+}
+
+.files-toolbar {
+  display: flex;
+  gap: 0.34rem;
+}
+
+.files-action-btn {
+  padding: 0.32rem 0.52rem;
+  font-size: 0.66rem;
+}
+
+.files-breadcrumb {
+  border: 1px solid var(--line);
+  background: rgba(7, 18, 12, 0.72);
+  color: var(--muted);
+  padding: 0.3rem 0.42rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.files-list {
+  min-height: 0;
+  border: 1px solid var(--line);
+  background: #06110b;
+  overflow: auto;
+  padding: 0.16rem;
+  display: grid;
+  align-content: start;
+  gap: 0.14rem;
+}
+
+.files-empty {
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  padding: 0.68rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.files-empty.bad {
+  border-color: rgba(255, 102, 114, 0.5);
+  color: var(--bad);
+}
+
+.files-entry {
+  width: 100%;
+  border: 1px solid transparent;
+  background: rgba(8, 19, 14, 0.75);
+  color: var(--text);
+  text-align: left;
+  padding: 0.26rem 0.34rem;
+  cursor: pointer;
+}
+
+.files-entry:hover,
+.files-entry:focus-visible {
+  border-color: var(--line-strong);
+  background: rgba(9, 23, 17, 0.9);
+}
+
+.files-entry.active {
+  border-color: rgba(122, 213, 71, 0.5);
+  background: rgba(19, 53, 34, 0.55);
+}
+
+.files-entry-name {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-entry-meta {
+  margin-top: 0.04rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.58rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-reader {
+  min-height: 0;
+  border: 1px solid var(--line);
+  background: #06110b;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.files-preview-meta {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  padding: 0.34rem 0.42rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-preview-meta.bad {
+  color: var(--bad);
+}
+
+.files-preview-content {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: #d8efe2;
+  padding: 0.56rem;
+  resize: none;
+  overflow: auto;
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  tab-size: 2;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.files-preview-content:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.files-placeholder {
   height: 100%;
   border: 1px dashed var(--line-strong);
   background: rgba(7, 18, 12, 0.58);
@@ -964,7 +1239,11 @@ textarea:focus {
 
 @media (max-width: 1340px) {
   .workspace {
-    grid-template-columns: 248px minmax(440px, 1fr) minmax(320px, 390px);
+    grid-template-columns:
+      var(--session-width)
+      minmax(420px, 1fr)
+      var(--pane-resizer-size)
+      minmax(300px, var(--execution-width));
   }
 }
 
@@ -980,8 +1259,12 @@ textarea:focus {
 
   .workspace {
     height: auto;
-    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-columns: var(--session-width) minmax(0, 1fr);
     grid-template-rows: minmax(30rem, 1fr) minmax(18rem, 24rem);
+  }
+
+  .pane-resizer-horizontal {
+    display: none;
   }
 
   .chat-column {
@@ -1039,6 +1322,10 @@ textarea:focus {
 
   .execution-feed {
     max-height: 46vh;
+  }
+
+  .files-view {
+    grid-template-rows: minmax(9rem, var(--files-selector-height)) var(--pane-resizer-size) minmax(0, 1fr);
   }
 
   .prompt-header {

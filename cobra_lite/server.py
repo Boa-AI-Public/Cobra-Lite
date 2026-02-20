@@ -1,13 +1,15 @@
 import json
+import mimetypes
 import os
 import queue
 import socket
 import threading
+from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
-from cobra_lite.config import BASE_DIR, OPENCLAW_GATEWAY_URL, SESSIONS_FILE, STATE_FILE
+from cobra_lite.config import BASE_DIR, OPENCLAW_GATEWAY_URL, OPENCLAW_STATE_DIR, SESSIONS_FILE, STATE_FILE
 from cobra_lite.services.gateway_client import (
     effective_gateway_url,
     extract_missing_provider,
@@ -57,6 +59,171 @@ def create_app() -> Flask:
 
     state_store = JsonStateStore(STATE_FILE)
     session_store = SessionStore(SESSIONS_FILE)
+    workspace_dir_override = str(os.getenv("OPENCLAW_WORKSPACE_DIR") or "").strip()
+    file_read_limit = 256_000
+    list_limit = 1000
+
+    def _resolve_workspace_root() -> Path:
+        candidates: list[Path] = []
+        if workspace_dir_override:
+            candidates.append(Path(workspace_dir_override).expanduser())
+        candidates.append(Path(OPENCLAW_STATE_DIR).expanduser() / "workspace")
+        candidates.append(Path.home() / ".openclaw" / "workspace")
+
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_dir():
+                    return candidate.resolve()
+            except OSError:
+                continue
+        primary = candidates[0] if candidates else (Path.home() / ".openclaw" / "workspace")
+        return primary.resolve()
+
+    def _ensure_workspace_root_exists() -> Path:
+        root = _resolve_workspace_root()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _workspace_path_from_relative(relative_path: str | None) -> Path:
+        root = _ensure_workspace_root_exists()
+        rel = str(relative_path or "").strip().replace("\\", "/")
+        rel = rel[1:] if rel.startswith("/") else rel
+        target = (root / rel).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError("Invalid path.")
+        return target
+
+    def _relative_workspace_path(path_obj: Path) -> str:
+        root = _resolve_workspace_root()
+        if path_obj == root:
+            return ""
+        return str(path_obj.relative_to(root)).replace("\\", "/")
+
+    def _is_binary(path_obj: Path) -> bool:
+        try:
+            sample = path_obj.read_bytes()[:8192]
+        except OSError:
+            return True
+        if not sample:
+            return False
+        return b"\x00" in sample
+
+    @app.get("/api/files/root")
+    def files_root():
+        root = _ensure_workspace_root_exists()
+        return jsonify(
+            {
+                "ok": True,
+                "workspace_root": str(root),
+                "exists": True,
+            }
+        )
+
+    @app.get("/api/files/list")
+    def files_list():
+        rel_path = request.args.get("path")
+        try:
+            target = _workspace_path_from_relative(rel_path)
+        except ValueError:
+            return jsonify({"ok": False, "message": "Invalid path."}), 400
+
+        if not target.exists():
+            return jsonify({"ok": False, "message": "Path not found."}), 404
+        if not target.is_dir():
+            return jsonify({"ok": False, "message": "Path is not a directory."}), 400
+
+        entries: list[dict[str, Any]] = []
+        try:
+            children = sorted(
+                list(target.iterdir()),
+                key=lambda item: (not item.is_dir(), item.name.lower()),
+            )[:list_limit]
+        except OSError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
+
+        for child in children:
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": _relative_workspace_path(child),
+                    "type": "dir" if child.is_dir() else "file",
+                    "size": stat.st_size if child.is_file() else None,
+                    "modified_at": int(stat.st_mtime),
+                }
+            )
+
+        return jsonify(
+            {
+                "ok": True,
+                "workspace_root": str(_resolve_workspace_root()),
+                "path": _relative_workspace_path(target),
+                "parent_path": _relative_workspace_path(target.parent) if target != _resolve_workspace_root() else None,
+                "entries": entries,
+            }
+        )
+
+    @app.get("/api/files/read")
+    def files_read():
+        rel_path = request.args.get("path")
+        try:
+            target = _workspace_path_from_relative(rel_path)
+        except ValueError:
+            return jsonify({"ok": False, "message": "Invalid path."}), 400
+
+        if not target.exists():
+            return jsonify({"ok": False, "message": "File not found."}), 404
+        if not target.is_file():
+            return jsonify({"ok": False, "message": "Path is not a file."}), 400
+
+        try:
+            stat = target.stat()
+        except OSError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
+
+        mime_type, _ = mimetypes.guess_type(str(target))
+        is_binary = _is_binary(target)
+        if is_binary:
+            return jsonify(
+                {
+                    "ok": True,
+                    "path": _relative_workspace_path(target),
+                    "name": target.name,
+                    "size": stat.st_size,
+                    "mime_type": mime_type or "application/octet-stream",
+                    "is_binary": True,
+                    "content": "",
+                    "truncated": False,
+                }
+            )
+
+        try:
+            raw_bytes = target.read_bytes()
+        except OSError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
+
+        truncated = len(raw_bytes) > file_read_limit
+        preview_bytes = raw_bytes[:file_read_limit]
+        try:
+            content = preview_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            content = preview_bytes.decode("utf-8", errors="replace")
+
+        return jsonify(
+            {
+                "ok": True,
+                "path": _relative_workspace_path(target),
+                "name": target.name,
+                "size": stat.st_size,
+                "mime_type": mime_type or "text/plain",
+                "is_binary": False,
+                "content": content,
+                "truncated": truncated,
+            }
+        )
 
     def _resolve_anthropic_key() -> str | None:
         env_key = str(os.getenv("ANTHROPIC_API_KEY") or "").strip()

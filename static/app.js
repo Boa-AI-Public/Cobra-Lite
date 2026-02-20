@@ -1,21 +1,37 @@
 const hasGateway = window.CLAW_HAS_GATEWAY === true;
 const hasAnthropicKey = window.CLAW_HAS_ANTHROPIC_KEY === true;
 const defaultGatewayUrl = window.CLAW_DEFAULT_GATEWAY_URL || "http://127.0.0.1:18789";
+const desktopMediaQuery = window.matchMedia("(max-width: 1160px)");
 
+const workspace = document.querySelector(".workspace");
 const keyGate = document.getElementById("key-gate");
 const mainApp = document.getElementById("main-app");
 const composerDock = document.getElementById("composer-dock");
+const chatColumn = document.querySelector(".chat-column");
 const chatThread = document.getElementById("chat-thread");
 const sessionPane = document.getElementById("session-pane");
 const sessionList = document.getElementById("session-list");
 const sessionStatus = document.getElementById("session-status");
 const newSessionBtn = document.getElementById("new-session-btn");
+const sessionFoldBtn = document.getElementById("session-fold-btn");
+const chatExecutionResizer = document.getElementById("chat-execution-resizer");
 const executionPane = document.getElementById("execution-pane");
 const executionFeed = document.getElementById("execution-feed");
 const executionTerminalView = document.getElementById("execution-terminal-view");
 const executionGraphView = document.getElementById("execution-graph-view");
+const executionFilesView = document.getElementById("execution-files-view");
 const executionTabTerminal = document.getElementById("execution-tab-terminal");
 const executionTabGraph = document.getElementById("execution-tab-graph");
+const executionTabFiles = document.getElementById("execution-tab-files");
+const filesUpBtn = document.getElementById("files-up-btn");
+const filesRefreshBtn = document.getElementById("files-refresh-btn");
+const filesBreadcrumb = document.getElementById("files-breadcrumb");
+const filesList = document.getElementById("files-list");
+const filesPreviewMeta = document.getElementById("files-preview-meta");
+const filesPreviewContent = document.getElementById("files-preview-content");
+const filesView = executionFilesView?.querySelector(".files-view") || null;
+const filesSelector = executionFilesView?.querySelector(".files-selector") || null;
+const filesResizer = document.getElementById("files-resizer");
 
 const keyForm = document.getElementById("key-form");
 const keyInput = document.getElementById("api-key-input");
@@ -43,11 +59,24 @@ let autoScrollEnabled = true;
 let unseenEventCount = 0;
 let jumpLatestBtn = null;
 const ACTIVE_SESSION_STORAGE_KEY = "cobraLite.activeSessionId.v1";
+const SESSION_PANE_COLLAPSED_KEY = "cobraLite.sessionPaneCollapsed.v1";
+const EXECUTION_WIDTH_STORAGE_KEY = "cobraLite.executionPaneWidth.v1";
+const FILE_SELECTOR_HEIGHT_STORAGE_KEY = "cobraLite.filesSelectorHeight.v1";
 
 let activeSessionId = null;
 let activeSessionMessages = [];
 let sessionSummaries = [];
 let anthropicConfigured = hasAnthropicKey;
+let sessionPaneCollapsed = false;
+let paneResizeHandlersBound = false;
+const fileViewerState = {
+  initialized: false,
+  loadingDirectory: false,
+  workspaceRoot: "",
+  currentPath: "",
+  parentPath: null,
+  selectedFilePath: "",
+};
 
 function decodeEscapedSequences(text) {
   if (!text || !text.includes("\\")) {
@@ -304,8 +333,205 @@ function setUnlocked(unlocked) {
   mainApp?.classList.toggle("hidden", !unlocked);
   composerDock?.classList.toggle("hidden", !unlocked);
   sessionPane?.classList.toggle("hidden", !unlocked);
+  chatExecutionResizer?.classList.toggle("hidden", !unlocked);
   executionPane?.classList.toggle("hidden", !unlocked);
   document.body.classList.toggle("sidebar-enabled", unlocked);
+  if (unlocked) {
+    requestAnimationFrame(() => {
+      restoreExecutionWidth();
+    });
+  }
+}
+
+function readStoredNumber(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (typeof raw !== "string") return null;
+    const parsed = Number.parseFloat(raw.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function writeStoredNumber(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch (_err) {
+    // Ignore storage errors
+  }
+}
+
+function clampNumber(value, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return min;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function getExecutionWidthBounds() {
+  const min = 300;
+  const currentExecution = executionPane?.getBoundingClientRect().width || min;
+  const currentChat = chatColumn?.getBoundingClientRect().width || 0;
+  const max = Math.max(min, currentExecution + Math.max(0, currentChat - 420));
+  return { min, max };
+}
+
+function applyExecutionWidth(widthPx, persist = false) {
+  if (!executionPane || desktopMediaQuery.matches) return;
+  const { min, max } = getExecutionWidthBounds();
+  const next = clampNumber(widthPx, min, max);
+  document.documentElement.style.setProperty("--execution-width", `${next}px`);
+  chatExecutionResizer?.setAttribute("aria-valuemin", String(Math.round(min)));
+  chatExecutionResizer?.setAttribute("aria-valuemax", String(Math.round(max)));
+  chatExecutionResizer?.setAttribute("aria-valuenow", String(Math.round(next)));
+  if (persist) {
+    writeStoredNumber(EXECUTION_WIDTH_STORAGE_KEY, Math.round(next));
+  }
+}
+
+function restoreExecutionWidth() {
+  if (desktopMediaQuery.matches) return;
+  const stored = readStoredNumber(EXECUTION_WIDTH_STORAGE_KEY);
+  if (stored === null) return;
+  applyExecutionWidth(stored, false);
+}
+
+function getFilesSelectorHeightBounds() {
+  const min = 120;
+  const filesRect = filesView?.getBoundingClientRect();
+  const resizerRect = filesResizer?.getBoundingClientRect();
+  if (!filesRect) {
+    return { min, max: min };
+  }
+  const max = Math.max(min, filesRect.height - 160 - (resizerRect?.height || 0));
+  return { min, max };
+}
+
+function applyFilesSelectorHeight(heightPx, persist = false) {
+  if (!filesView) return;
+  const { min, max } = getFilesSelectorHeightBounds();
+  const next = clampNumber(heightPx, min, max);
+  filesView.style.setProperty("--files-selector-height", `${next}px`);
+  filesResizer?.setAttribute("aria-valuemin", String(Math.round(min)));
+  filesResizer?.setAttribute("aria-valuemax", String(Math.round(max)));
+  filesResizer?.setAttribute("aria-valuenow", String(Math.round(next)));
+  if (persist) {
+    writeStoredNumber(FILE_SELECTOR_HEIGHT_STORAGE_KEY, Math.round(next));
+  }
+}
+
+function restoreFilesSelectorHeight() {
+  const stored = readStoredNumber(FILE_SELECTOR_HEIGHT_STORAGE_KEY);
+  if (stored === null) return;
+  applyFilesSelectorHeight(stored, false);
+}
+
+function setupResizablePanes() {
+  if (paneResizeHandlersBound) return;
+  paneResizeHandlersBound = true;
+
+  chatExecutionResizer?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || desktopMediaQuery.matches || !executionPane) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = executionPane.getBoundingClientRect().width;
+    document.body.classList.add("dragging-col");
+
+    const onPointerMove = (moveEvent) => {
+      const deltaX = startX - moveEvent.clientX;
+      applyExecutionWidth(startWidth + deltaX, false);
+    };
+
+    const onPointerUp = () => {
+      document.body.classList.remove("dragging-col");
+      const currentWidth = executionPane.getBoundingClientRect().width;
+      applyExecutionWidth(currentWidth, true);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  });
+
+  chatExecutionResizer?.addEventListener("keydown", (event) => {
+    if (desktopMediaQuery.matches || !executionPane) return;
+    const step = event.shiftKey ? 42 : 16;
+    const current = executionPane.getBoundingClientRect().width;
+    const { min, max } = getExecutionWidthBounds();
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      applyExecutionWidth(current + step, true);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      applyExecutionWidth(current - step, true);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      applyExecutionWidth(min, true);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      applyExecutionWidth(max, true);
+    }
+  });
+
+  filesResizer?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !filesSelector) {
+      return;
+    }
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = filesSelector.getBoundingClientRect().height;
+    document.body.classList.add("dragging-row");
+
+    const onPointerMove = (moveEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      applyFilesSelectorHeight(startHeight + deltaY, false);
+    };
+
+    const onPointerUp = () => {
+      document.body.classList.remove("dragging-row");
+      const currentHeight = filesSelector.getBoundingClientRect().height;
+      applyFilesSelectorHeight(currentHeight, true);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  });
+
+  filesResizer?.addEventListener("keydown", (event) => {
+    if (!filesSelector) return;
+    const step = event.shiftKey ? 32 : 12;
+    const current = filesSelector.getBoundingClientRect().height;
+    const { min, max } = getFilesSelectorHeightBounds();
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      applyFilesSelectorHeight(current - step, true);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      applyFilesSelectorHeight(current + step, true);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      applyFilesSelectorHeight(min, true);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      applyFilesSelectorHeight(max, true);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    restoreExecutionWidth();
+    restoreFilesSelectorHeight();
+  });
 }
 
 function setRunningState(running) {
@@ -415,13 +641,269 @@ async function ensureAnthropicKeyConfigured({ showModal = false } = {}) {
 }
 
 function showExecutionTab(tab) {
-  const showTerminal = tab !== "graph";
+  const normalized = tab === "graph" || tab === "files" ? tab : "terminal";
+  const showTerminal = normalized === "terminal";
+  const showGraph = normalized === "graph";
+  const showFiles = normalized === "files";
+
   executionTerminalView?.classList.toggle("hidden", !showTerminal);
-  executionGraphView?.classList.toggle("hidden", showTerminal);
+  executionGraphView?.classList.toggle("hidden", !showGraph);
+  executionFilesView?.classList.toggle("hidden", !showFiles);
+
   executionTabTerminal?.classList.toggle("active", showTerminal);
-  executionTabGraph?.classList.toggle("active", !showTerminal);
+  executionTabGraph?.classList.toggle("active", showGraph);
+  executionTabFiles?.classList.toggle("active", showFiles);
+
   executionTabTerminal?.setAttribute("aria-selected", showTerminal ? "true" : "false");
-  executionTabGraph?.setAttribute("aria-selected", showTerminal ? "false" : "true");
+  executionTabGraph?.setAttribute("aria-selected", showGraph ? "true" : "false");
+  executionTabFiles?.setAttribute("aria-selected", showFiles ? "true" : "false");
+
+  if (showFiles) {
+    requestAnimationFrame(() => {
+      restoreFilesSelectorHeight();
+    });
+    ensureFilesViewReady();
+  }
+}
+
+function formatFileSize(sizeBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(size) || size < 0) return "0 B";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatFileDate(epochSeconds) {
+  const value = Number(epochSeconds);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  try {
+    return new Date(value * 1000).toLocaleString();
+  } catch (_err) {
+    return "";
+  }
+}
+
+function setFilesPreviewMeta(message, bad = false) {
+  if (!filesPreviewMeta) return;
+  filesPreviewMeta.textContent = message || "";
+  filesPreviewMeta.classList.toggle("bad", !!bad);
+}
+
+function clearFilesPreview(message = "Select a file to preview.") {
+  setFilesPreviewMeta(message, false);
+  if (filesPreviewContent) {
+    filesPreviewContent.value = "";
+  }
+}
+
+function renderFilesBreadcrumb() {
+  if (!filesBreadcrumb) return;
+  const suffix = fileViewerState.currentPath ? `/${fileViewerState.currentPath}` : "";
+  filesBreadcrumb.textContent = `Workspace${suffix}`;
+}
+
+function renderFilesList(entries) {
+  if (!filesList) return;
+  filesList.innerHTML = "";
+
+  if (!Array.isArray(entries) || entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "files-empty";
+    empty.textContent = "This folder is empty.";
+    filesList.appendChild(empty);
+    return;
+  }
+
+  for (const entry of entries) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `files-entry ${entry.type === "dir" ? "dir" : "file"}`;
+    item.dataset.entryPath = normalizeText(entry.path, "");
+    if (entry.path === fileViewerState.selectedFilePath) {
+      item.classList.add("active");
+    }
+
+    const name = document.createElement("div");
+    name.className = "files-entry-name";
+    name.textContent = `${entry.type === "dir" ? "▸" : "•"} ${entry.name}`;
+    item.appendChild(name);
+
+    const meta = document.createElement("div");
+    meta.className = "files-entry-meta";
+    if (entry.type === "dir") {
+      const updated = formatFileDate(entry.modified_at);
+      meta.textContent = updated ? `Directory · ${updated}` : "Directory";
+    } else {
+      const updated = formatFileDate(entry.modified_at);
+      const size = formatFileSize(entry.size);
+      meta.textContent = updated ? `${size} · ${updated}` : size;
+    }
+    item.appendChild(meta);
+
+    item.addEventListener("click", async () => {
+      if (entry.type === "dir") {
+        await loadFilesDirectory(entry.path);
+      } else {
+        await loadFilePreview(entry.path);
+      }
+    });
+
+    filesList.appendChild(item);
+  }
+}
+
+function updateFilesSelectionHighlight() {
+  if (!filesList) return;
+  const selectedPath = fileViewerState.selectedFilePath;
+  for (const child of filesList.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    const path = child.dataset.entryPath || "";
+    child.classList.toggle("active", !!selectedPath && path === selectedPath);
+  }
+}
+
+async function loadFilesDirectory(path = "") {
+  if (fileViewerState.loadingDirectory) return;
+  fileViewerState.loadingDirectory = true;
+  if (filesList) {
+    filesList.innerHTML = '<div class="files-empty">Loading...</div>';
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (path) {
+      params.set("path", path);
+    }
+    const query = params.toString();
+    const payload = await fetchJson(`/api/files/list${query ? `?${query}` : ""}`);
+    fileViewerState.initialized = true;
+    fileViewerState.workspaceRoot = normalizeText(payload.workspace_root, "");
+    fileViewerState.currentPath = normalizeText(payload.path, "");
+    fileViewerState.parentPath = payload.parent_path === null ? null : normalizeText(payload.parent_path, "");
+
+    renderFilesBreadcrumb();
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    renderFilesList(entries);
+    const selectedStillVisible = entries.some(
+      (entry) => entry.type === "file" && normalizeText(entry.path, "") === fileViewerState.selectedFilePath
+    );
+    if (!selectedStillVisible) {
+      fileViewerState.selectedFilePath = "";
+      clearFilesPreview(
+        fileViewerState.workspaceRoot
+          ? `Workspace root: ${fileViewerState.workspaceRoot}`
+          : "Select a file to preview."
+      );
+    }
+  } catch (error) {
+    fileViewerState.initialized = false;
+    if (filesList) {
+      filesList.innerHTML = `<div class="files-empty bad">${escapeHtml(error.message || "Could not load files.")}</div>`;
+    }
+    clearFilesPreview("Could not load directory.");
+  } finally {
+    fileViewerState.loadingDirectory = false;
+    if (filesUpBtn) {
+      filesUpBtn.disabled = fileViewerState.parentPath === null;
+    }
+  }
+}
+
+async function loadFilePreview(path) {
+  const normalizedPath = normalizeText(path, "");
+  if (!normalizedPath) return;
+  fileViewerState.selectedFilePath = normalizedPath;
+  renderFilesBreadcrumb();
+
+  setFilesPreviewMeta("Loading file...");
+  if (filesPreviewContent) {
+    filesPreviewContent.value = "";
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set("path", normalizedPath);
+    const payload = await fetchJson(`/api/files/read?${params.toString()}`);
+
+    const sizeLabel = formatFileSize(payload.size);
+    const mimeType = normalizeText(payload.mime_type, "application/octet-stream");
+    const isBinary = payload.is_binary === true;
+    const truncated = payload.truncated === true;
+    const summaryParts = [`${payload.name || normalizedPath}`, `${sizeLabel}`, mimeType];
+    if (isBinary) summaryParts.push("binary");
+    if (truncated) summaryParts.push("preview truncated");
+    setFilesPreviewMeta(summaryParts.join(" · "));
+
+    if (filesPreviewContent) {
+      if (isBinary) {
+        filesPreviewContent.value = "Binary file preview is not supported.";
+      } else {
+        filesPreviewContent.value = normalizeText(payload.content, "");
+      }
+    }
+    updateFilesSelectionHighlight();
+  } catch (error) {
+    setFilesPreviewMeta(error.message || "Could not read file.", true);
+    if (filesPreviewContent) {
+      filesPreviewContent.value = "";
+    }
+  }
+}
+
+async function ensureFilesViewReady() {
+  if (fileViewerState.initialized) {
+    return;
+  }
+  clearFilesPreview();
+  try {
+    const rootPayload = await fetchJson("/api/files/root");
+    fileViewerState.workspaceRoot = normalizeText(rootPayload.workspace_root, "");
+    if (rootPayload.exists !== true) {
+      if (filesList) {
+        filesList.innerHTML = '<div class="files-empty bad">Workspace path does not exist yet.</div>';
+      }
+      setFilesPreviewMeta(fileViewerState.workspaceRoot || "Workspace not found.", true);
+      return;
+    }
+    clearFilesPreview(`Workspace root: ${fileViewerState.workspaceRoot}`);
+    await loadFilesDirectory("");
+  } catch (error) {
+    if (filesList) {
+      filesList.innerHTML = `<div class="files-empty bad">${escapeHtml(error.message || "Could not load workspace root.")}</div>`;
+    }
+    setFilesPreviewMeta("Workspace unavailable.", true);
+  }
+}
+
+function readSessionPaneCollapsed() {
+  try {
+    return localStorage.getItem(SESSION_PANE_COLLAPSED_KEY) === "1";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function writeSessionPaneCollapsed(collapsed) {
+  try {
+    if (collapsed) {
+      localStorage.setItem(SESSION_PANE_COLLAPSED_KEY, "1");
+    } else {
+      localStorage.removeItem(SESSION_PANE_COLLAPSED_KEY);
+    }
+  } catch (_err) {
+    // Ignore storage errors
+  }
+}
+
+function applySessionPaneCollapsed(collapsed) {
+  sessionPaneCollapsed = !!collapsed;
+  document.body.classList.toggle("sessions-collapsed", sessionPaneCollapsed);
+  if (sessionFoldBtn) {
+    sessionFoldBtn.textContent = sessionPaneCollapsed ? "»" : "«";
+    sessionFoldBtn.title = sessionPaneCollapsed ? "Expand sessions" : "Collapse sessions";
+    sessionFoldBtn.setAttribute("aria-expanded", sessionPaneCollapsed ? "false" : "true");
+  }
 }
 
 function scrollExecutionToBottom() {
@@ -1385,6 +1867,25 @@ executionTabGraph?.addEventListener("click", () => {
   showExecutionTab("graph");
 });
 
+executionTabFiles?.addEventListener("click", () => {
+  showExecutionTab("files");
+});
+
+filesUpBtn?.addEventListener("click", async () => {
+  if (fileViewerState.parentPath === null) return;
+  await loadFilesDirectory(fileViewerState.parentPath);
+});
+
+filesRefreshBtn?.addEventListener("click", async () => {
+  await loadFilesDirectory(fileViewerState.currentPath);
+});
+
+sessionFoldBtn?.addEventListener("click", () => {
+  const next = !sessionPaneCollapsed;
+  applySessionPaneCollapsed(next);
+  writeSessionPaneCollapsed(next);
+});
+
 settingsBtn?.addEventListener("click", () => {
   settingsModal.classList.remove("hidden");
   settingsStatus.textContent = "";
@@ -1424,7 +1925,10 @@ settingsForm?.addEventListener("submit", async (event) => {
 });
 
 async function bootstrap() {
+  setupResizablePanes();
+  applySessionPaneCollapsed(readSessionPaneCollapsed());
   setUnlocked(hasGateway);
+  restoreExecutionWidth();
   showExecutionTab("terminal");
   renderExecutionEmpty();
   if (hasGateway) {
