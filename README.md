@@ -1,4 +1,8 @@
+
+
 # Cobra Lite - An OpenClaw Hacking Copilot
+
+![Cobra Lite demo screenshot](static/images/Demo_screenshot.png)
 
 A web-based security testing interface powered by **OpenClaw** - your AI-driven penetration testing assistant.
 
